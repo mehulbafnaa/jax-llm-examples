@@ -1,4 +1,8 @@
 # JAX LLM examples
 
-This is a work-in-progress collection of high-performance examples of how to
-implement models in JAX using best practices.
+A collection (in progress) of example high-performance large language model
+implementations, written with JAX.
+
+Current contents include:
+
+* [DeepSeek R1](deepseek_r1_jax/)

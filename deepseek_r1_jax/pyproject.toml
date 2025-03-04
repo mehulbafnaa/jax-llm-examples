@@ -1,0 +1,50 @@
+[project]
+name = "deeseek_r1_jax"
+version = "0.1.0"
+description = "Fast, cheap, and minimal Deepseek R1 inference in JAX"
+authors = [
+    { name = "Robert Dyro" },
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "jax",
+    "transformers>=4.49.0",  # for the model config and the tokenizer
+    "tqdm",
+    "numpy",
+    "orbax-checkpoint",
+    "ipykernel",
+    "tpu-info",
+    "etils",
+    "torch",
+    "torchvision>=0.21.0",
+]
+
+# we don't need CUDA torch
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cpu"
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.lint]
+ignore = [
+    "E731", # lambdas expression instead of def
+]
+
+[tool.setuptools]
+packages = ["deepseek_r1_jax"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["pyproject.toml"] }

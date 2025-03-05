@@ -33,8 +33,6 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 from jax.experimental.shard_map import shard_map
 from jax.sharding import NamedSharding, PartitionSpec as P
 
-import orbax.checkpoint as ocp
-
 from .decode_ragged_dot import decode_ragged_dot
 
 
@@ -1210,11 +1208,15 @@ def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config,
 
 # serialization
 def save_pytree(data, path):
+    import orbax.checkpoint as ocp
+
     with ocp.PyTreeCheckpointer() as ckptr:
         ckptr.save(epath.Path(path), data, ocp.args.PyTreeSave(data, ocdbt_target_data_file_size=1024 * 1024 * 100))
 
 
 def load_pytree(path, sharding=None):
+    import orbax.checkpoint as ocp
+
     item, transforms = sharding, None
     restore_args = jax.tree.map(lambda s: ocp.ArrayRestoreArgs(sharding=s), sharding)
     with ocp.PyTreeCheckpointer() as ckptr:

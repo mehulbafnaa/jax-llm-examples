@@ -1023,8 +1023,11 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
     is_embedding_sharded = not (l2p("act_embed")[0] is None)
     if is_embedding_sharded:  # activations are sharded
         out_spec = P(*(out_spec[:-1] + (tensor_axname,)))  # override last axis name
+    if cfg.strategy == "prefill":
+        out_spec = P(*(out_spec[:-1] + (tensor_axname,)))  # override last axis name
 
     expert_count = cfg.mesh.axis_sizes[cfg.mesh.axis_names.index(expert_axname)] if expert_axname is not None else 1
+    tensor_count = cfg.mesh.axis_sizes[cfg.mesh.axis_names.index(tensor_axname)] if tensor_axname is not None else 1
     assert cfg.n_routed_experts % expert_count == 0
     expert_size = cfg.n_routed_experts // expert_count
 
@@ -1075,6 +1078,12 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
             ff_out = jnp.where(valid_group_mask_sort_[..., None], ff_out, 0)  # expensive
 
         if cfg.strategy == "prefill":
+            rs_shape = math.ceil((ff_out.shape[-1] // tensor_count) / 256) * 256 * tensor_count
+            pad_size = rs_shape - ff_out.shape[-1]
+            ff_out = jnp.pad(ff_out, ((0, 0), (0, pad_size)))
+            ff_out = jax.lax.psum_scatter(ff_out, axis_name=tensor_axname, scatter_dimension=1, tiled=True)
+
+        if cfg.strategy == "prefill":
             with jax.named_scope("expert_weighting"):
                 ff_out = ff_out * topk_weights.reshape(-1)[sort_idx_][..., None]
             with jax.named_scope("unpermute"):
@@ -1100,26 +1109,30 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
                 ff_out_expert = ff_out_expert.astype(cfg.weight_dtype)
 
         with jax.named_scope("experts_collective"):
-            # collectives
-            if is_embedding_sharded:  # activations are supposed to be sharded on out
-                with jax.named_scope("tp_e_psum_scatter"):
-                    ff_out_expert = jax.lax.psum_scatter(
-                        ff_out_expert, tensor_axname, scatter_dimension=1, tiled=True
-                    )
-                with jax.named_scope("ep_e_psum"):
-                    if expert_axname is not None:
-                        ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
+            if cfg.strategy == "prefill":
+                if expert_axname is not None:
+                    ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
             else:
-                psum_axes = tensor_axname if expert_axname is None else (expert_axname, tensor_axname)
-                ff_out_expert = jax.lax.psum(ff_out_expert, psum_axes)
+              # collectives
+              if is_embedding_sharded:  # activations are supposed to be sharded on out
+                  with jax.named_scope("tp_e_psum_scatter"):
+                      ff_out_expert = jax.lax.psum_scatter(
+                          ff_out_expert, tensor_axname, scatter_dimension=1, tiled=True
+                      )
+                  with jax.named_scope("ep_e_psum"):
+                      if expert_axname is not None:
+                          ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
+              else:
+                  psum_axes = tensor_axname if expert_axname is None else (expert_axname, tensor_axname)
+                  ff_out_expert = jax.lax.psum(ff_out_expert, psum_axes)
             ff_out_expert = ff_out_expert.reshape((b, s, ff_out_expert.shape[-1]))
             return ff_out_expert
 
     with jax.named_scope("moe_routed_expert"):
         x_ = psc(x, x_spec)
-        ff_out_expert = _expert_fn(x_, we_gate, we_up, we_down, topk_weights, topk_idx)
+        ff_out_expert = _expert_fn(x_, we_gate, we_up, we_down, topk_weights, topk_idx)[..., :x.shape[-1]]
     with jax.named_scope("moe_shared_expert"):
-        ff_out_shared = mlp_block(x, MLPLayer(layer.ws_gate, layer.ws_up, layer.ws_down), cfg)
+        ff_out_shared = mlp_block(x, MLPLayer(layer.ws_gate, layer.ws_up, layer.ws_down), cfg)[..., :x.shape[-1]]
     return psc(ff_out_expert + ff_out_shared, l2p("batch", "sequence", "act_embed"))
 
 

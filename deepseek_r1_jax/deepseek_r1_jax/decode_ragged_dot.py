@@ -26,7 +26,8 @@ from tqdm import tqdm
 
 def decode_ragged_dot_kernel(
     # scalar prefetch
-    lhs_idx_map_ref,
+    lhs_idx_map_ref,  # [n // block_n]
+    rhs_idx_map_ref,  # [g // block_g]
     # inputs
     x_ref,  # [n, k]
     A_ref,  # [g // block_g, k, m]
@@ -161,18 +162,38 @@ def decode_ragged_dot(
 
     grid = (g // block_g, n // block_n)
 
+    # compute lhs prefetch map, only increment lhs idx if work is exhausted to avoid revisiting rows in lhs/output
+    # [[ 0 0 1 1 ]
+    #  [ 1 1 1 1 ]
+    #  [ 1 2 2 2 ]
+    #  [ 3 4 4 4 ]]
     work_total = jnp.pad(jnp.cumsum(jnp.sum(group_sizes.reshape((-1, block_g)), -1), axis=-1), (1, 0))
     min_lhs_j = work_total[:-1] // block_n
-    idx_map = min_lhs_j[:, None] + jnp.arange(grid[1])[None, :]
-    idx_map = jnp.clip(idx_map, max=jnp.pad(min_lhs_j[1:], (0, 1), constant_values=grid[1] - 1)[:, None])
+    lhs_idx_map = min_lhs_j[:, None] + jnp.arange(grid[1])[None, :]
+    lhs_idx_map = jnp.clip(lhs_idx_map, max=jnp.pad(min_lhs_j[1:], (0, 1), constant_values=grid[1] - 1)[:, None])
+    
+    # compute rhs prefetch map
+    # [ 1 1 1 3 4 5 5 5] if 8 groups, but only {1, 3, 4, 5} active
+    def _compute_rhs_idx(i_prev, mask):
+      i, prev = i_prev
+      idx = jnp.where(mask, i, prev)
+      return (i - 1, idx), idx
 
-    def lhs_prefetch(i, j, lhs_idx_map_ref):
-        # as opposed to : `return j, 0`
+    rhs_work_mask = jnp.sum(group_sizes.reshape((-1, block_g)), -1) > 0
+    flipped_rhs_work_mask = jnp.flip(rhs_work_mask, -1)
+    last_idx_mask = jnp.flip((jnp.cumsum(flipped_rhs_work_mask, -1) == 1) & flipped_rhs_work_mask, -1)
+    last_idx = jnp.sum(jnp.arange(grid[0], dtype=jnp.int32) * last_idx_mask)
+    rhs_idx_map = jnp.flip(jax.lax.scan(_compute_rhs_idx, (grid[0] - 1, last_idx), flipped_rhs_work_mask)[1], -1)
+    
+    def lhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
+        # as opposed to: `return j, 0`
+        del rhs_idx_map_ref
         return lhs_idx_map_ref[i, j], 0
 
-    def rhs_prefetch(i, j, lhs_idx_map_ref):
+    def rhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
+        # as opposed to: `return i, 0, 0`
         del j, lhs_idx_map_ref
-        return i, 0, 0
+        return rhs_idx_map_ref[i], 0, 0
 
     in_specs = [
         pl.BlockSpec((block_n, k), lhs_prefetch),
@@ -188,7 +209,7 @@ def decode_ragged_dot(
     ]
 
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=1,
+        num_scalar_prefetch=2,
         grid=grid,
         in_specs=in_specs,
         out_specs=out_specs,
@@ -201,7 +222,7 @@ def decode_ragged_dot(
         out_shape=out_shape,
         grid_spec=grid_spec,
         interpret=interpret,
-    )(idx_map, lhs, rhs, group_sizes.astype(jnp.int32))
+    )(lhs_idx_map, rhs_idx_map, lhs, rhs, group_sizes.astype(jnp.int32))
 
 
 @partial(jax.jit, static_argnames=("block_n", "block_g", "block_compute"))

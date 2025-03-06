@@ -69,20 +69,26 @@ Responses:
 
 ## Inference performance results
 
-| TPU    | batch size | context length | tok/s | HBM BW util | $/1M tokens | comments     |
+| TPU    | batch size | context length | tok/s | HBM BW util $^*$ | $/1M tokens | comments     |
 | :----- | ---------: | -------------: | ----: | ----------: | ----------: | :----------- |
-| v5e-64 |          1 |             32 |  **49.3** |       65.8% |        $173 | max tok/s    |
-| v5e-64 |          1 |            512 |  48.8 |       65.2% |        $175 |              |
-| v5e-64 |          1 |           4096 |  48.1 |       64.2% |        $178 |              |
-| v5e-64 |          1 |           8192 |  47.3 |       63.1% |        $180 |              |
-| v5e-64 |          8 |             32 |  45.7 |       61.0% |       $23.4 |              |
-| v5e-64 |          8 |            512 |  44.2 |       59.0% |       $24.2 |              |
-| v5e-64 |          8 |           4096 |  38.3 |       51.2% |       $27.8 |              |
-| v5e-64 |          8 |           8192 |  34.0 |       45.4% |       $31.4 |              |
-| v5e-64 |        128 |             32 |  20.3 |       27.1% |       **$3.28** | cost optimal |
-| v5e-64 |        128 |            512 |  17.9 |       23.9% |       $3.72 |              |
+| v5e-64  | 1          | 32    | 75.8    | 113%   |  $113       |           |
+| v5e-64  | 1          | 512   | **75.9**    | 113%   |  $112       | max tok/s          |
+| v5e-64  | 1          | 4096  | 73.8    | 110%   |  $116       |          |
+| v5e-64  | 1          | 8192  | 71.0    | 106%   |  $120       |          |
+| v5e-64  | 8          | 32    | 50.5    | 75.2%  |  $21.1      |          |
+| v5e-64  | 8          | 512   | 48.0    | 71.4%  |  $22.2      |          |
+| v5e-64  | 8          | 4096  | 42.1    | 62.6%  |  $25.3      |          |
+| v5e-64  | 8          | 8192  | 35.6    | 52.9%  |  $30.0      |          |
+| v5e-64  | 128        | 32    | 19.6    | 29.1%  |  **$3.41**      |  cost optimal          |
+| v5e-64  | 128        | 512   | 17.4    | 25.8%  |  $3.84      |          |
 
-Results generated using jax 0.5.0, Python 3.10.15. Cost computation based on https://cloud.google.com/spot-vms/pricing, region `us-central1` as of Feb 28 2025.
+Results generated using jax 0.5.2, Python 3.10.15. Cost computation based on
+https://cloud.google.com/spot-vms/pricing, region `us-central1` as of Feb 28
+2025.
+
+$^*$ HBM BW util computed from on-chip network size = 780 GB and 819 GB/s
+theoretical TPU v5e HBM BW. For small batches, not all experts are loaded from
+HBM leading to >100% utilization.
 
 ### Optimization Decisions
 

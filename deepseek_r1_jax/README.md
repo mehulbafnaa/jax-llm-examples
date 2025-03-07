@@ -16,11 +16,11 @@ via [main.py](main.py). Among other things, the model code demonstrates:
   for easy multi-device/multi-host computation; and
 * simple int8 quantization.
 
-This implementation aims for comparable performance and cost to other R1
-inference offerings, using a fully open-source, easy-to-understand, minimal
-codebase. We hope to offer an accessible starting point for performant 
-inference with JAX. See the [performance rundown](#inference-performance-results) 
-below.
+This example aims to be a concise, self-contained, fully open-source codebase,
+with performance that is reasonably comparable to other R1 inference offerings (at
+cost). We hope that it is easy to understand and offers an accessible starting
+point for performant inference with JAX. See the
+[performance rundown](#inference-performance-results) below.
 
 In addition, this repo includes an
 [overview](#transformer-parallelism-strategies) of how to shard transformers and

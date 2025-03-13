@@ -20,15 +20,17 @@ from pathlib import Path
 import jax
 from jax.sharding import PartitionSpec as P
 
-from deepseek_r1_jax import model as ShardingRules
+from deepseek_r1_jax.model import ShardingRules, Config
 from deepseek_r1_jax import chkpt_utils as utils
-from deepseek_r1_jax.third_party import modeling_deepseek as deepseek
 
 def main():
     root_path = Path("/mnt/storage/DeepSeek-R1")
     dest_path = Path("/mnt/storage/deepseek-r1-jax-chkpt")
-    config = deepseek.DeepseekV3Config()
-    cfg = utils.convert_config(config)
+
+    cfg = Config()
+    cfg.quantize_mlp = False
+    cfg.quantize_attn = True
+    cfg.quantize_moe = True
 
     rules = ShardingRules(*(None for _ in dataclasses.fields(ShardingRules)))  # fully replicated
     cfg = dataclasses.replace(cfg, mesh=jax.make_mesh((1,), P("x")), rules=rules)

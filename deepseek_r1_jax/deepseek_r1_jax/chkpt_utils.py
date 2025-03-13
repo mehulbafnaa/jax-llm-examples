@@ -123,13 +123,16 @@ def convert_config(config: deepseek.DeepseekV3Config) -> Config:
 
 
 def _cast_dtype(layer, layer_abst):
+    assert jax.tree.structure(layer, is_leaf=is_param) == jax.tree.structure(layer_abst, is_leaf=is_param)
     return jax.tree.map(lambda x, y: x.astype(y.dtype), layer, layer_abst, is_leaf=is_param)
 
 
 def convert_attn_layer(params_or_attn: deepseek.DeepseekV3Attention | dict, cfg: Config):
-    layer_abst = AttentionLayer.abstract(cfg)
+    unquant_cfg = dataclasses.replace(cfg, quantize_attn=False)
+    layer_abst = AttentionLayer.abstract(unquant_cfg)
+    layer = AttentionLayer.abstract(unquant_cfg)
+
     params = params_or_attn if isinstance(params_or_attn, dict) else dict(params_or_attn.named_parameters())
-    layer = AttentionLayer.abstract(cfg)
     q_head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim
 
     layer.q_a = t2j(params["q_a_proj.weight"].data.T)
@@ -151,13 +154,16 @@ def convert_attn_layer(params_or_attn: deepseek.DeepseekV3Attention | dict, cfg:
         expected_shape = getattr(layer_abst, name).shape
         actual_shape = getattr(getattr(layer, name).shape, "shape", getattr(layer, name).shape)
         assert actual_shape == expected_shape, f"For {name = } {expected_shape = } vs {actual_shape = }"
+
     return _cast_dtype(layer, layer_abst)
 
 
 def convert_mlp_layer(params_or_mlp: deepseek.DeepseekV3MLP, cfg: Config):
-    layer_abst = MLPLayer.abstract(cfg)
+    unquant_cfg = dataclasses.replace(cfg, quantize_mlp=False)
+    layer_abst = MLPLayer.abstract(unquant_cfg)
+    layer = MLPLayer.abstract(unquant_cfg)
+
     params = params_or_mlp if isinstance(params_or_mlp, dict) else dict(params_or_mlp.named_parameters())
-    layer = MLPLayer.abstract(cfg)
 
     layer.w_gate = t2j(params["gate_proj.weight"].data.T)
     layer.w_up = t2j(params["up_proj.weight"].data.T)
@@ -171,9 +177,11 @@ def convert_mlp_layer(params_or_mlp: deepseek.DeepseekV3MLP, cfg: Config):
 
 
 def convert_moe_layer(params_or_moe: deepseek.DeepseekV3MoE | dict, cfg: Config):
-    layer_abst = MoELayer.abstract(cfg)
+    unquant_cfg = dataclasses.replace(cfg, quantize_moe=False)
+    layer_abst = MoELayer.abstract(unquant_cfg)
+    layer = MoELayer.abstract(unquant_cfg)
+
     params = params_or_moe if isinstance(params_or_moe, dict) else dict(params_or_moe.named_parameters())
-    layer = MoELayer.abstract(cfg)
 
     layer.w_router = t2j(params["gate.weight"].data.T)
     layer.b_router = t2j(params["gate.e_score_correction_bias"].data)
@@ -202,8 +210,10 @@ def convert_layer(params_or_layer: deepseek.DeepseekV3DecoderLayer | dict, cfg: 
     params = params_or_layer if isinstance(params_or_layer, dict) else dict(params_or_layer.named_parameters())
     use_moe = len([k for k in params.keys() if "expert" in k]) > 0
 
-    layer_abst = Layer.abstract(cfg, use_moe=use_moe)
-    layer = Layer.abstract(cfg, use_moe=use_moe)
+    unquant_cfg = dataclasses.replace(cfg, quantize_attn=False, quantize_mlp=False, quantize_moe=False)
+    layer_abst = Layer.abstract(unquant_cfg, use_moe=use_moe)
+    layer = Layer.abstract(unquant_cfg, use_moe=use_moe)
+
     attn_params = {k[len("self_attn.") :]: v for (k, v) in params.items() if k.startswith("self_attn.")}
     layer.attn = convert_attn_layer(attn_params, cfg)
     mlp_params = {k[len("mlp.") :]: v for (k, v) in params.items() if k.startswith("mlp.")}
@@ -327,7 +337,7 @@ def convert_hf_checkpoint(params_map, root_path, dest_path, cfg: Config):
 
     for idx in tqdm(range(cfg.num_layers)):
         layer = convert_layer(load_params_from_prefix(params_map, root_path, f"model.layers.{idx}."), cfg)
-        layer_quant = layer.quantize(layer, cfg)
+        layer_quant = Layer.quantize(layer, cfg)
         save_pytree(layer_quant, dest_path / f"layer_{idx}")
         gc.collect()
 

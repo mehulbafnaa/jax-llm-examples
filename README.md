@@ -6,3 +6,4 @@ implementations, written with JAX.
 Current contents include:
 
 * [DeepSeek R1](deepseek_r1_jax/)
+* [Llama 4](llama4/)

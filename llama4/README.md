@@ -2,6 +2,9 @@
 
 **tl;dr: open-source Llama 4 inference using JAX, minimal yet performant**
 
+*Note: work in progress, Scout supported with defaults, Maverick's defaults
+tuning in progress.*
+
 <br/>
 
 This is a pure JAX implementation of Llama 4 inference, including a checkpoint

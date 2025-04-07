@@ -55,6 +55,15 @@ $ gcloud compute tpus tpu-vm ssh {TPU_NAME} --worker=all \
     --command="cd ~/llama4_jax && python3 main.py"
 ```
 
+Responses:
+```
+[
+  "\n\nI'm Llama, a model designed by Meta. What’s your name, or should I start guessing?<|eot|><|header_start|>assistant<|header_end|>\n\nI'm Llama, a",
+  "\n\nHear me, ye knaves! Gather 'round and heed my words, for I shall regale thee with tales of yonder skies and the",
+  "\n\nA question that requires precision!\n\nAs a computer program, I don't have personal preferences, taste buds, or a physical body. Therefore, I neither like nor"
+]
+```
+
 (See [Working with multi-host clusters](#working-with-multi-host-clusters) for full setup.)
 
 ## Inference performance results

@@ -28,7 +28,7 @@ from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P, use_mesh, NamedSharding
+from jax.sharding import PartitionSpec as P, use_mesh
 from jax.experimental.shard import auto_axes, reshard
 from etils import epath
 
@@ -75,7 +75,7 @@ class ShardingRules:
     qkv_embed: AxisName = None
     q_heads: AxisName = ATTN_HEADS_AXIS_NAME
     kv_heads: AxisName = ATTN_HEADS_AXIS_NAME
-    o_heads: AxisName = ATTN_HEADS_AXIS_NAME 
+    o_heads: AxisName = ATTN_HEADS_AXIS_NAME
     o_embed: AxisName = None
     # MLP
     embed_up: AxisName = None
@@ -183,7 +183,7 @@ def llama_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
     nope_layer_interval = 4
     return Config(
         embed=_get(llama_config, "dim"),
-        mlp_ffw_size={1.2: 16384}[_get(llama_config, "ffn_dim_multiplier")], # odd Llama calculation of hidden dim
+        mlp_ffw_size={1.2: 16384}[_get(llama_config, "ffn_dim_multiplier")],  # odd Llama calculation of hidden dim
         moe_ffw_size={4: 8192}[_get(llama_config, "ffn_exp")],  # odd Llama calculation of hidden dim
         q_heads=_get(llama_config, "n_heads"),
         kv_heads=_get(llama_config, "n_kv_heads"),
@@ -207,8 +207,8 @@ def llama_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
 
 def hf_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
     _get = lambda x, k, default=None: getattr(x, k, default) if hasattr(x, k) else dict(x).get(k, default)
-    #num_layers = _get(llama_config, "num_hidden_layers")
-    #nope_layer_interval = round(num_layers / (num_layers - sum(_get(llama_config, "no_rope_layers"))))
+    # num_layers = _get(llama_config, "num_hidden_layers")
+    # nope_layer_interval = round(num_layers / (num_layers - sum(_get(llama_config, "no_rope_layers"))))
     nope_layer_interval = 4
     return Config(
         embed=_get(llama_config, "hidden_size"),
@@ -235,13 +235,13 @@ def hf_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
 
 
 def load_config(config_path: str | os.PathLike[str] | Path) -> "Config":
-    #return llama_to_jax_config(json.loads(Path(config_path).read_text()))
+    # return llama_to_jax_config(json.loads(Path(config_path).read_text()))
     return hf_to_jax_config(json.loads(Path(config_path).read_text())["text_config"])
 
 
 def load_tokenizer(
     tokenizer_path: str | os.PathLike[str] | Path, tokenizer_config_path: str | os.PathLike[str] | Path
-) -> "PreTrainedTokenizerFast":
+) -> "PreTrainedTokenizerFast":  # noqa: F821
     from transformers import PreTrainedTokenizerFast, AddedToken
 
     config = json.loads(Path(tokenizer_config_path).read_text())
@@ -378,6 +378,7 @@ def update_slice(x: jax.Array | QuantArray, y: jax.Array, pos: int, update_axis:
         y = reshard(y.astype(x.dtype), jax.typeof(x).sharding.spec)
         return jax.lax.dynamic_update_slice_in_dim(x, y, pos, axis=update_axis)
 
+
 @jax_pytree_struct
 class AttentionLayer(_Init):
     q: jax.Array | ArrayInfo | QuantArray
@@ -418,6 +419,7 @@ class AttentionLayer(_Init):
             v=QuantArray(*quantize(layer.v, (1, 2), scale_dtype)),
             o=QuantArray(*quantize(layer.o, (0, 1), scale_dtype), out_scaling=True),
         )
+
 
 @jax_pytree_struct
 class MLPLayer(_Init):
@@ -469,36 +471,40 @@ class MoELayer(_Init):
         _sinit = jax.nn.initializers.he_normal(in_axis=0, out_axis=1)
         dtype = cfg.dtype
         layer = MoELayer(
-            w_router=ArrayInfo(
-                (cfg.embed, cfg.moe_num_experts), cfg.moe_gate_dtype, ("moe_e_up_embed", None), _sinit
-            ),
+            w_router=ArrayInfo((cfg.embed, cfg.moe_num_experts), cfg.moe_gate_dtype, ("moe_e_up_embed", None), _sinit),
             we_gate=ArrayInfo(
-                (cfg.moe_num_experts, cfg.embed, cfg.moe_ffw_size), dtype,
+                (cfg.moe_num_experts, cfg.embed, cfg.moe_ffw_size),
+                dtype,
                 ("moe_e_experts", "moe_e_up_embed", "moe_e_up_ffw"),
                 _einit,
             ),
             we_up=ArrayInfo(
-                (cfg.moe_num_experts, cfg.embed, cfg.moe_ffw_size), dtype,
+                (cfg.moe_num_experts, cfg.embed, cfg.moe_ffw_size),
+                dtype,
                 ("moe_e_experts", "moe_e_up_embed", "moe_e_up_ffw"),
                 _einit,
             ),
             we_down=ArrayInfo(
-                (cfg.moe_num_experts, cfg.moe_ffw_size, cfg.embed), dtype,
+                (cfg.moe_num_experts, cfg.moe_ffw_size, cfg.embed),
+                dtype,
                 ("moe_e_experts", "moe_e_down_ffw", "moe_e_down_embed"),
                 _einit,
             ),
             ws_gate=ArrayInfo(
-                (cfg.embed, cfg.moe_num_shared_experts * cfg.moe_ffw_size), dtype,
+                (cfg.embed, cfg.moe_num_shared_experts * cfg.moe_ffw_size),
+                dtype,
                 ("moe_s_up_embed", "moe_s_up_ffw"),
                 _sinit,
             ),
             ws_up=ArrayInfo(
-                (cfg.embed, cfg.moe_num_shared_experts * cfg.moe_ffw_size), dtype,
+                (cfg.embed, cfg.moe_num_shared_experts * cfg.moe_ffw_size),
+                dtype,
                 ("moe_s_up_embed", "moe_s_up_ffw"),
                 _sinit,
             ),
             ws_down=ArrayInfo(
-                (cfg.moe_ffw_size, cfg.moe_num_shared_experts * cfg.embed), dtype,
+                (cfg.moe_ffw_size, cfg.moe_num_shared_experts * cfg.embed),
+                dtype,
                 ("moe_s_down_ffw", "moe_s_down_embed"),
                 _sinit,
             ),
@@ -522,7 +528,6 @@ class MoELayer(_Init):
         )
 
 
-
 @jax_pytree_struct
 class Layer(_Init):
     mlp: MLPLayer | MoELayer
@@ -541,7 +546,7 @@ class Layer(_Init):
             attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
             attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
         )
-        #layer = cls.quantize(layer, cfg)  # abstract already quantized
+        # layer = cls.quantize(layer, cfg)  # abstract already quantized
         return layer
 
     @staticmethod
@@ -549,6 +554,7 @@ class Layer(_Init):
         return dataclasses.replace(
             layer, mlp=layer.mlp.quantize(layer.mlp, cfg), attn=layer.attn.quantize(layer.attn, cfg)
         )
+
 
 @jax_pytree_struct
 class Weights(_Init):
@@ -890,16 +896,16 @@ def attention_block(
             )
         else:
             attn_out = attention(q, k, v, q_segment_ids, k_segment_ids, q_offset, cfg)
-            
+
     # Project attention output
     with jax.named_scope("projection"):
         attn_out = einsum(
             "bhtq,hqd->btd", attn_out, layer.o, out_sharding=l2p("batch", "sequence", "act_embed")
         ).astype(cfg.dtype)
     return attn_out, k, v
-    
 
-#@partial(jax.jit, static_argnames=("replicated_routing",))
+
+# @partial(jax.jit, static_argnames=("replicated_routing",))
 def _route_tokens_to_moe_experts(x: jax.Array, weight: jax.Array, replicated_routing: bool, cfg: Config):
     lsc = lambda x, spec: reshard(x, logical_to_physical(spec, cfg.rules))
     x_shape = x.shape
@@ -970,7 +976,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
 
     in_specs = (x_spec, we_gate_spec, we_up_spec, we_down_spec, topk_weights_spec, topk_idx_spec)
 
-    is_embedding_sharded = not (l2p("act_embed")[0] is None)
+    is_embedding_sharded = l2p("act_embed")[0] is not None
     if is_embedding_sharded:  # activations are sharded
         out_spec = P(*(out_spec[:-1] + (tensor_axname,)))  # override last axis name
     if cfg.ep_strategy == "prefill":
@@ -986,6 +992,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
         (b, s, d), e = x.shape, cfg.moe_experts_per_tok
         expert_idx = jax.lax.axis_index(expert_axname) if expert_axname is not None else 0
         tensor_idx = jax.lax.axis_index(tensor_axname) if tensor_axname is not None else 0
+        del tensor_idx
         topk_idx_ = topk_idx.reshape(-1)
         valid_group_mask_ = (topk_idx_ >= expert_size * expert_idx) & (topk_idx_ < expert_size * (expert_idx + 1))
         expert_mapped_topk_idx_ = jnp.where(valid_group_mask_, topk_idx_ - expert_idx * expert_size, 2**30)
@@ -1001,7 +1008,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
         expert_mapped_topk_idx_sort_ = expert_mapped_topk_idx_[sort_idx_]
         valid_group_mask_sort_ = expert_mapped_topk_idx_sort_ < 2**30
         expert_mapped_topk_idx_sort_ = jnp.where(expert_mapped_topk_idx_sort_ < 2**30, expert_mapped_topk_idx_sort_, 0)
-        
+
         # equivalent to:
         # ```
         # x_repeat_ = jnp.repeat(x.reshape((-1, x.shape[-1])), e, axis=0)
@@ -1052,7 +1059,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
             with jax.named_scope("unpermute"):
                 ff_out = jnp.take_along_axis(ff_out, isort_idx_[..., None], axis=-2)
             with jax.named_scope("expert_summing"):
-                ff_out_expert = jnp.sum(ff_out.reshape((b * s, e, -1)), -2)
+                ff_out_expert = jnp.sum(ff_out.reshape((b * s, e, d)), -2)
                 ff_out_expert = ff_out_expert.astype(cfg.dtype)
 
         with jax.named_scope("experts_collective"):
@@ -1060,26 +1067,26 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
                 if expert_axname is not None:
                     ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
             else:
-              # collectives
-              if is_embedding_sharded:  # activations are supposed to be sharded on out
-                  with jax.named_scope("tp_e_psum_scatter"):
-                      ff_out_expert = jax.lax.psum_scatter(
-                          ff_out_expert, tensor_axname, scatter_dimension=1, tiled=True
-                      )
-                  with jax.named_scope("ep_e_psum"):
-                      if expert_axname is not None:
-                          ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
-              else:
-                  psum_axes = tensor_axname if expert_axname is None else (expert_axname, tensor_axname)
-                  ff_out_expert = jax.lax.psum(ff_out_expert, psum_axes)
+                # collectives
+                if is_embedding_sharded:  # activations are supposed to be sharded on out
+                    with jax.named_scope("tp_e_psum_scatter"):
+                        ff_out_expert = jax.lax.psum_scatter(
+                            ff_out_expert, tensor_axname, scatter_dimension=1, tiled=True
+                        )
+                    with jax.named_scope("ep_e_psum"):
+                        if expert_axname is not None:
+                            ff_out_expert = jax.lax.psum(ff_out_expert, expert_axname)
+                else:
+                    psum_axes = tensor_axname if expert_axname is None else (expert_axname, tensor_axname)
+                    ff_out_expert = jax.lax.psum(ff_out_expert, psum_axes)
             ff_out_expert = ff_out_expert.reshape((b, s, ff_out_expert.shape[-1]))
             return ff_out_expert
 
     with jax.named_scope("moe_routed_expert"):
         x_ = psc(x, x_spec)
-        ff_out_expert = _expert_fn(x_, we_gate, we_up, we_down, topk_weights, topk_idx)[..., :x.shape[-1]]
+        ff_out_expert = _expert_fn(x_, we_gate, we_up, we_down, topk_weights, topk_idx)[..., : x.shape[-1]]
     with jax.named_scope("moe_shared_expert"):
-        ff_out_shared = mlp_block(x, MLPLayer(layer.ws_gate, layer.ws_up, layer.ws_down), cfg)[..., :x.shape[-1]]
+        ff_out_shared = mlp_block(x, MLPLayer(layer.ws_gate, layer.ws_up, layer.ws_down), cfg)[..., : x.shape[-1]]
     return psc(ff_out_expert + ff_out_shared, l2p("batch", "sequence", "act_embed"))
 
 
@@ -1179,9 +1186,11 @@ def load_pytree(path, sharding=None):
 
     item, transforms = sharding, None
     restore_args = jax.tree.map(lambda s: ocp.ArrayRestoreArgs(sharding=s), sharding)
+    # print(restore_args, flush=True)
+    # print(ocp.args.PyTreeRestore(item=item, transforms=transforms, restore_args=restore_args), flush=True)
     with ocp.PyTreeCheckpointer() as ckptr:
         return ckptr.restore(
-            epath.Path(path), ocp.args.PyTreeRestore(item=item, transforms=transforms, restore_args=restore_args)
+            epath.Path(path), args=ocp.args.PyTreeRestore(item=item, transforms=transforms, restore_args=restore_args)
         )
 
 
@@ -1196,7 +1205,9 @@ def prepare_chunk(chunk, pad_to: int, pad_id: int):
     return chunk, segment_ids
 
 
-def prefill(tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = 0, batch_idx: int = 0):
+def prefill(
+    tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = 0
+) -> tuple[jax.Array, jax.Array, KVCache]:
     """Samples from a prompt."""
     # Calculate the next power of 2 for padding, up to cfg.max_seq.
     assert tokens.shape[-1] <= cfg.max_seq_len
@@ -1214,7 +1225,8 @@ def prefill(tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pa
         logits, cache = jax.jit(forward, donate_argnums=(4,), out_shardings=(logits_shardings, cache_shardings))(
             prompt, prompt_segment_ids, weights, cfg, cache
         )
-        return logits, cache
+        next_tokens = jax.jit(partial(jnp.argmax, axis=-1))(logits)
+        return next_tokens, logits, cache
 
 
 @partial(jax.jit, donate_argnames=("cache",))

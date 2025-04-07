@@ -19,7 +19,7 @@ from pprint import pformat
 import jax
 from jax import numpy as jnp
 from jax import random
-from jax.sharding import use_mesh
+from jax.sharding import use_mesh, AxisType
 import numpy as np
 
 from llama4_jax import model as l4jax
@@ -37,12 +37,14 @@ if __name__ == "__main__":
     jax.distributed.initialize()
     quant = False
 
-    ckpt_path = epath.Path(f"~/bucket/Llama-4-Scout-Instruct").expanduser()
+    ckpt_path = epath.Path("~/bucket/Llama-4-Scout-Instruct").expanduser()
     if quant:
         ckpt = ckpt_path.parent / f"{ckpt_path.name}-quant"
     tokenizer = l4jax.load_tokenizer(ckpt_path / "tokenizer.json", ckpt_path / "tokenizer_config.json")
 
-    mesh = jax.make_mesh((1, jax.device_count() // 2, 2), ("x", "y", "z"), devices=jax.devices(), axis_types=("explicit",) * 3)
+    mesh = jax.make_mesh(
+        (1, jax.device_count() // 2, 2), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
+    )
     cfg = dataclasses.replace(l4jax.Config(), mesh=mesh, quant_attn=quant, quant_moe=quant, quant_mlp=quant)
 
     weights = l4jax.load_pytree(ckpt_path.expanduser(), l4jax.Weights.shardings(cfg))

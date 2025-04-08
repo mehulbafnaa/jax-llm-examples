@@ -26,18 +26,18 @@ from tqdm import tqdm
 
 def decode_ragged_dot_kernel(
     # scalar prefetch
-    lhs_idx_map_ref,  # [n // block_n]
-    rhs_idx_map_ref,  # [g // block_g]
+    lhs_idx_map_ref,  # [g // block_g, n // block_n]
+    rhs_idx_map_ref,  # [g // block_g, n // block_n]
     # inputs
-    x_ref,  # [n, k]
-    A_ref,  # [g // block_g, k, m]
+    x_ref,  # [block_n, k]
+    A_ref,  # [block_g, k, m]
     group_sizes_ref,  # [g]
     # outputs
-    y_ref,  # [g // block_g, n, m]  # hbm scratch output, to-be-reduced over 0-axis
+    y_ref,  # [block_n, m]  # hbm scratch output, to-be-reduced over 0-axis
     # (scratch) persistent lhs idx
-    lhs_idx_ref,  # []
-    group_id_ref,  # []
-    group_size_ref,  # []
+    lhs_idx_ref,  # [1]
+    group_id_ref,  # [1]
+    group_size_ref,  # [1]
     # hyperparameters
     block_n: int,
     block_g: int,

@@ -65,8 +65,8 @@ def decode_ragged_dot_kernel(
     def outer_body_fn(i, carry):
         lhs_idx, group_id, group_size = carry
         local_i = i - block_n_id * (block_n // block_compute)
-        y = pl.load(y_ref, (pl.ds(local_i * block_compute, block_compute), pl.ds(None))).astype(jnp.float32)
-        x = pl.load(x_ref, (pl.ds(local_i * block_compute, block_compute), pl.ds(None)))
+        y = y_ref[pl.ds(local_i * block_compute, block_compute), :].astype(jnp.float32)
+        x = x_ref[pl.ds(local_i * block_compute, block_compute), :]
 
         # iterate until lhs rows are exhausted or we use up all rhs groups
         def cond_fn(val):
@@ -85,7 +85,7 @@ def decode_ragged_dot_kernel(
 
             def _compute():
                 # compute the actual product with the group_id group
-                A = pl.load(A_ref, (local_group_id, pl.ds(None), pl.ds(None)))
+                A = A_ref[local_group_id, :, :]
                 xA = jax.lax.dot_general(x, A, (((1,), (0,)), ((), ())), preferred_element_type=jnp.float32).astype(
                     y.dtype
                 )
@@ -106,7 +106,7 @@ def decode_ragged_dot_kernel(
         y, new_lhs_idx, new_group_id, new_group_size = jax.lax.while_loop(
             cond_fn, body_fn, (y, lhs_idx, group_id, group_size)
         )
-        pl.store(y_ref, (pl.ds(local_i * block_compute, block_compute), pl.ds(None)), y.astype(y_ref.dtype))
+        y_ref[pl.ds(local_i * block_compute, block_compute), :] = y.astype(y_ref.dtype)
         return new_lhs_idx, new_group_id, new_group_size
 
     start_idx = jnp.maximum(lhs_idx, block_n_id * block_n) // block_compute
@@ -171,7 +171,7 @@ def decode_ragged_dot(
     min_lhs_j = work_total[:-1] // block_n
     lhs_idx_map = min_lhs_j[:, None] + jnp.arange(grid[1])[None, :]
     lhs_idx_map = jnp.clip(lhs_idx_map, max=jnp.pad(min_lhs_j[1:], (0, 1), constant_values=grid[1] - 1)[:, None])
-    
+
     # compute rhs prefetch map
     # [ 1 1 1 3 4 5 5 5] if 8 groups, but only {1, 3, 4, 5} active
     def _compute_rhs_idx(i_prev, mask):
@@ -184,7 +184,7 @@ def decode_ragged_dot(
     last_idx_mask = jnp.flip((jnp.cumsum(flipped_rhs_work_mask, -1) == 1) & flipped_rhs_work_mask, -1)
     last_idx = jnp.sum(jnp.arange(grid[0], dtype=jnp.int32) * last_idx_mask)
     rhs_idx_map = jnp.flip(jax.lax.scan(_compute_rhs_idx, (grid[0] - 1, last_idx), flipped_rhs_work_mask)[1], -1)
-    
+
     def lhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
         # as opposed to: `return j, 0`
         del rhs_idx_map_ref

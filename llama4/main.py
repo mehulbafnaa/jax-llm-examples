@@ -48,7 +48,7 @@ if __name__ == "__main__":
     tokenizer = l4jax.load_tokenizer(ckpt_path / "tokenizer.json", ckpt_path / "tokenizer_config.json")
 
     mesh = jax.make_mesh(
-        (1, jax.device_count() // 2, 2), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
+        (1, 8, jax.device_count() // 8), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
     )
     cfg = l4jax.hf_to_jax_config(json.loads((ckpt_path / "config.json").read_text())["text_config"])
     cfg = dataclasses.replace(cfg, mesh=mesh, quant_attn=quant, quant_moe=quant, quant_mlp=quant)

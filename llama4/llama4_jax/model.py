@@ -146,6 +146,7 @@ class Config:
     causal: bool
     nope_layer_interval: int
     use_qk_norm: bool
+    attn_chunk_size: int
     # MLP
     mlp_ffw_size: int
     # MoE
@@ -192,6 +193,7 @@ def llama_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
         vocab_size=_get(llama_config, "vocab_size"),
         norm_eps=_get(llama_config, "norm_eps"),
         use_qk_norm=_get(llama_config, "use_qk_norm"),
+        attn_chunk_size=_get(llama_config, "attention_chunk_size"),
         nope_layer_interval=nope_layer_interval,
         moe_layer_interval=_get(llama_config, "moe_args")["interleave_moe_layer_step"],
         moe_experts_per_tok=_get(llama_config, "moe_args")["top_k"],
@@ -221,6 +223,7 @@ def hf_to_jax_config(llama_config: Any | dict[str, Any]) -> "Config":
         vocab_size=_get(llama_config, "vocab_size"),
         norm_eps=_get(llama_config, "rms_norm_eps"),
         use_qk_norm=_get(llama_config, "use_qk_norm"),
+        attn_chunk_size=_get(llama_config, "attention_chunk_size"),
         nope_layer_interval=nope_layer_interval,
         moe_layer_interval=_get(llama_config, "interleave_moe_layer_step"),
         moe_experts_per_tok=_get(llama_config, "num_experts_per_tok"),
@@ -703,7 +706,16 @@ def apply_rotary_embedding(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.
     return jnp.stack([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1).reshape(x.shape)
 
 
-def make_attention_mask(q_len, k_len, q_segment_ids, k_segment_ids, q_offset, causal: bool):
+def make_attention_mask(
+    q_len,
+    k_len,
+    q_segment_ids,
+    k_segment_ids,
+    q_offset,
+    causal: bool,
+    chunk_attn_size: int | None = None,
+    starts: jax.Array | None = None,
+):
     # [B, t, T]
     segment_mask = q_segment_ids[:, :, None] == k_segment_ids[:, None, :]
     # [B, t, T] -> [B, 1, t, T]
@@ -717,6 +729,11 @@ def make_attention_mask(q_len, k_len, q_segment_ids, k_segment_ids, q_offset, ca
         q_positions = q_iota + q_offset[:, None, None, None]
         causal_mask = q_positions >= k_iota
         combined_mask = jnp.logical_and(segment_mask, causal_mask)
+        if chunk_attn_size is not None:
+            assert starts is not None
+            starts_ = starts[:, None, None, None]
+            chunk_attn_mask = (q_positions - starts_) // chunk_attn_size == (k_iota - starts_) // chunk_attn_size
+            combined_mask = jnp.logical_and(combined_mask, chunk_attn_mask)
         return combined_mask
     else:
         return segment_mask
@@ -730,7 +747,10 @@ def attention(
     q_segment_ids: jax.Array,
     k_segment_ids: jax.Array,
     q_offset: jax.Array,
+    starts: jax.Array,
+    lengths: jax.Array,
     cfg: Config,
+    attn_chunk_size: int | None = None,
 ) -> jax.Array:
     """
     Compute attention.
@@ -758,7 +778,9 @@ def attention(
     qk = einsum("bhgtd,bhTd->bhgtT", q_, k) * scale
     qk = qk.reshape((b, qh, t, T))
 
-    mask = make_attention_mask(t, T, q_segment_ids, k_segment_ids, q_offset, cfg.causal)
+    del lengths
+    mask = make_attention_mask(t, T, q_segment_ids, k_segment_ids, q_offset, cfg.causal, attn_chunk_size, starts)
+
     # Apply the combined mask
     qk = jnp.where(mask, qk, -1e30)
     # jax softmax impl includes max subtraction for numerical stability, no need to do it outside.
@@ -770,7 +792,9 @@ def attention(
     return qkv.reshape((b, qh, t, d))
 
 
-def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, lengths, cfg: Config):
+def attention_kernel(
+    q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, lengths, cfg: Config, attn_chunk_size: int | None = None
+):
     """Flash attention kernel!"""
 
     # On TPUv3, pallas seems to only work with float32.
@@ -806,13 +830,23 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
         q = q.reshape(q.shape[:-3] + (k.shape[-3], kv_repeats, q.shape[-2], q.shape[-1]))
 
         if q.shape[-2] != 1:
-            mask = mask_lib.MultiHeadMask([mask_lib.CausalMask((q.shape[-2], k.shape[-2])) for _ in range(q.shape[-3])])
+            mask = mask_lib.CausalMask((q.shape[-2], k.shape[-2]))
+            if attn_chunk_size is not None:
+                # map segment ids to enforce chunk local attention
+                # this is incompatible with sequence packing, we're assuming 1 segment per row
+                local_q_segment_ids = ((jnp.arange(q_segment_ids.shape[-1]) - starts[:, None]) // attn_chunk_size) + 1
+                q_segment_ids = jnp.where((q_segment_ids != 0) & (local_q_segment_ids > 0), q_segment_ids, 0)
+                local_kv_segment_ids = ((jnp.arange(kv_segment_ids.shape[-1]) - starts[:, None]) // attn_chunk_size) + 1
+                kv_segment_ids = jnp.where((kv_segment_ids != 0) & (local_kv_segment_ids > 0), local_kv_segment_ids, 0)
+                # add sliding window attention mask to lower bound the chunk local attention sparsity
+                local_window_mask = mask_lib.LocalMask((q.shape[-2], k.shape[-2]), (attn_chunk_size, None), 0)
+                mask = mask_lib.LogicalAnd(mask, local_window_mask)
+            mask = mask_lib.MultiHeadMask([mask for _ in range(q.shape[-3])])
+            segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
             block_q, block_kv = min(q.shape[-2], 512), min(k.shape[-2], 1024)
             block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
             attn_fn = splash.make_splash_mqa_single_device(mask=mask, block_sizes=block_sizes)
             attn_fn = jax.vmap(jax.vmap(attn_fn, in_axes=(0, 0, 0, None)), in_axes=(0, 0, 0, 0))
-
-            segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
             if k_scale is not None:
                 k = (k * k_scale[..., None]).astype(jnp.bfloat16)
             if v_scale is not None:
@@ -825,6 +859,9 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
             in_axes += ((None if k_scale is None else 1),)
             in_axes += ((None if v_scale is None else 1),)
             hyperparams = dict(scale=scale, block_kv=512, block_bs=32)
+            if attn_chunk_size:
+                # bring starts up to the beginning of the current block
+                starts = jnp.maximum(starts, ((lengths - starts) // attn_chunk_size) * attn_chunk_size + starts)
             ret = jax.vmap(partial(ragged_attention.ragged_decode_fwd, **hyperparams), in_axes=in_axes, out_axes=1)(
                 q, k, v, starts, lengths, k_scale, v_scale
             )
@@ -890,12 +927,12 @@ def attention_block(
 
     # Compute attention
     with jax.named_scope("attention"):
+        attn_args = (q, k, v, q_segment_ids, k_segment_ids, q_offset, starts, lengths)
+        attn_chunk_size = None if not is_nope else cfg.attn_chunk_size
         if (cfg.use_prefill_attn_kernel and q.shape[-2] != 1) or (cfg.use_decode_attn_kernel and q.shape[-2] == 1):
-            attn_out = attention_kernel(
-                q, k, v, q_segment_ids, k_segment_ids, q_offset, starts=starts, lengths=lengths, cfg=cfg
-            )
+            attn_out = attention_kernel(*attn_args, cfg=cfg, attn_chunk_size=attn_chunk_size)
         else:
-            attn_out = attention(q, k, v, q_segment_ids, k_segment_ids, q_offset, cfg)
+            attn_out = attention(*attn_args, cfg, attn_chunk_size=attn_chunk_size)
 
     # Project attention output
     with jax.named_scope("projection"):
@@ -905,7 +942,7 @@ def attention_block(
     return attn_out, k, v
 
 
-# @partial(jax.jit, static_argnames=("replicated_routing",))
+@partial(jax.jit, static_argnames=("replicated_routing",))
 def _route_tokens_to_moe_experts(x: jax.Array, weight: jax.Array, replicated_routing: bool, cfg: Config):
     lsc = lambda x, spec: reshard(x, logical_to_physical(spec, cfg.rules))
     x_shape = x.shape
@@ -929,7 +966,7 @@ def _moe_gmm(lhs, rhs, group_sizes, topk_idx, cfg: Config):
     group_sizes = group_sizes.astype(jnp.int32)
     if cfg.use_ragged_dot_kernel and lhs.shape[0] <= 1024 and which_platform(cfg) == "tpu":
         with jax.named_scope("jax.lax.ragged_dot"):
-            block_g, block_n = min(4, rhs.shape[0]), min(16, lhs.shape[0])
+            block_g, block_n = min(8, rhs.shape[0]), min(128, lhs.shape[0])
             if is_type(rhs, QuantArray):
                 assert rhs.scale.ndim == 2 and rhs.scale.shape == (rhs.quant.shape[0], rhs.quant.shape[2])
                 scale = jnp.take_along_axis(rhs.scale, topk_idx[:, None], axis=-2)
@@ -955,7 +992,8 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
     _qpsc = lambda z, spec: dataclasses.replace(z, quant=_psc(z.quant, spec.quant), scale=_psc(z.scale, spec.scale))
     psc = lambda z, spec: _qpsc(z, spec) if is_type(z, QuantArray) else _psc(z, spec)
 
-    replicated_routing = x.shape[-2] == 1  # we're decoding
+    # we're decoding or device count does not divide total token count
+    replicated_routing = x.shape[-2] == 1 or (x.shape[-2] * x.shape[-3]) % jax.device_count() != 0
     topk_weights, topk_idx = _route_tokens_to_moe_experts(x, layer.w_router, replicated_routing, cfg)
     tensor_axname, expert_axname = l2p("moe_e_tp")[0], l2p("moe_e_ep")[0]
 
@@ -1186,8 +1224,6 @@ def load_pytree(path, sharding=None):
 
     item, transforms = sharding, None
     restore_args = jax.tree.map(lambda s: ocp.ArrayRestoreArgs(sharding=s), sharding)
-    # print(restore_args, flush=True)
-    # print(ocp.args.PyTreeRestore(item=item, transforms=transforms, restore_args=restore_args), flush=True)
     with ocp.PyTreeCheckpointer() as ckptr:
         return ckptr.restore(
             epath.Path(path), args=ocp.args.PyTreeRestore(item=item, transforms=transforms, restore_args=restore_args)

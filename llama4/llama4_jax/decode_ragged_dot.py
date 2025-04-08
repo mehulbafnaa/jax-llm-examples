@@ -222,6 +222,7 @@ def decode_ragged_dot(
         out_shape=out_shape,
         grid_spec=grid_spec,
         interpret=interpret,
+        compiler_params=pltpu.TPUCompilerParams(vmem_limit_bytes=1024 * 1024 * 50),
     )(lhs_idx_map, rhs_idx_map, lhs, rhs, group_sizes.astype(jnp.int32))
 
 

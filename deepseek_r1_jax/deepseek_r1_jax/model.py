@@ -765,7 +765,7 @@ def attention(
     Returns:
     Attention output of shape (batch_size, num_heads, q_len, head_dim)
     """
-    scale = _get_attn_scale(q_nope.shape[-1], cfg)
+    scale = _get_attn_scale(q_nope.shape[-1] + q_pe.shape[-1], cfg)
 
     # grouped-query attention
     b, h, t, d = q_nope.shape

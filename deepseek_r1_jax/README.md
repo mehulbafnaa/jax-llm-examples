@@ -199,9 +199,9 @@ A typical decoder-only transformer consists of
 
 ### Sharding strategies for a transformer
 
-The simplest sharding strategy, pipeline parallelism, is putting the first
-couple of layers on the first device, the next couple of layers on the second,
-and so on, since it requires simples communication of passing activations
+The simplest sharding strategy, naive eager pipeline parallelism, is putting the
+first couple of layers on the first device, the next couple of layers on the
+second, and so on, and it requires simple communication of passing activations
 between devices every couple of layers. Unfortunately, for fast inference, this
 implies that latter devices wait for the earlier ones to complete - decoding at
 a speed of a single device. Strategies that favor parallel work among devices,

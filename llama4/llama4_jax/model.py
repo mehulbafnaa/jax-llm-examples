@@ -1267,10 +1267,9 @@ def prefill(
 
 @partial(jax.jit, donate_argnames=("cache",))
 def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config):
-    with use_mesh(cfg.mesh):
-        assert last_tokens.ndim == 2
-        segment_ids = jnp.ones(last_tokens.shape, dtype=jnp.int32)
-        next_logits, cache = forward(last_tokens, segment_ids, weights, cfg, cache)
-        next_tokens = jnp.argmax(next_logits, -1)
-        next_tokens = reshard(next_tokens, P())
-        return next_tokens, cache
+    assert last_tokens.ndim == 2
+    segment_ids = jnp.ones(last_tokens.shape, dtype=jnp.int32)
+    next_logits, cache = forward(last_tokens, segment_ids, weights, cfg, cache)
+    next_tokens = jnp.argmax(next_logits, -1)
+    next_tokens = reshard(next_tokens, P())
+    return next_tokens, cache

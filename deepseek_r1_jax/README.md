@@ -118,7 +118,7 @@ in inference.
   (e.g. heavy use of custom kernels). In addition, this example only uses
   well-known optimization strategies, and does not aim to introduce any new or
   closed-source techniques that inference providers may have independently developed.
-  
+
 
 
 #### TPU Optimizations
@@ -138,17 +138,17 @@ in inference.
 - Q: Which TPU image to use?
 
   A: For v5e: `v2-alpha-tpuv5-lite`, for v6e: `v2-alpha-tpuv6e`. See [runtimes](https://cloud.google.com/tpu/docs/runtimes).
-  
+
 #### Custom Kernels
 
 1. [ragged dot](deepseek_r1_jax/decode_ragged_dot.py) - a grouped matmul operation
-    
+
     *Needed for good decode inference performance with small batches.*
 
     XLA underlying JAX is very good at merging and fusing operations which means
     we often don't need custom kernels for optimal hardware performance.
     However, Deepseek R1 uses uncommonly many, but small experts.
-    
+
     For anything but small batch sizes in decode, we can use
     [jax.lax.ragged_dot](https://github.com/jax-ml/jax/blob/5179642eb5572b8fbec01dca5e03e2a636e513c2/jax/_src/lax/lax.py#L2209)
     for full performance, but where `jax.lax.ragged_dot` is suboptimal, we write
@@ -158,12 +158,12 @@ in inference.
 ## Transformer parallelism strategies
 
 This section overviews different sharding strategies and their performance considerations for Transformer architectures in general.
-For a very in-depth guide on this topic, check out [How to Scale Your Model](https://jax-ml.github.io/scaling-book/). 
+For a very in-depth guide on this topic, check out [How to Scale Your Model](https://jax-ml.github.io/scaling-book/).
 The next section goes over Deepseek-specific optimizations.
 
 A typical decoder-only transformer consists of
 
-1. An input embedding 
+1. An input embedding
     - a single weight $V \times D$
 2. Repeated Decoder Layers (Attention + a Feed-forward layer)
     * Attention Layer
@@ -173,11 +173,11 @@ A typical decoder-only transformer consists of
     * Feed-forward Layer - a Multilayer Perceptron (MLP) or a Mixture-of-Experts (MoE)
         - always (i) up-projection -> (ii) nonlinearity -> (iii) down-projection
         - MLP
-            - up-projection: $BSD \times DF \rightarrow BSF$ 
+            - up-projection: $BSD \times DF \rightarrow BSF$
             - down-projection: $BSF \times DF \rightarrow BSD$
         - MoE
             - each token in $BS$ can be routed to a matrix slice $EDF[\text{idx}, :, :]$
-            - up-projection: $BSD \times EDF \rightarrow BSF$ 
+            - up-projection: $BSD \times EDF \rightarrow BSF$
             - down-projection: $BSF \times EDF \rightarrow BSD$
 3. An output projection
     - a single weight $D \times V$
@@ -305,10 +305,76 @@ $$
 
 ### MoE Layer in Inference
 
-Since the expert layers in Deepseek V3 are small, $E_{=256}D_{=7168}F_{=2048}$
-and TPUs work best when the minor-most dimensions is $\geq 128$, we can only shard
-the expert matrices among $16$ devices mesh axis ($16 \cdot 128 = 2048$). For the other
-axis in the mesh the only other sharde-able dimension is the expert dimension.
+*The MoE layer implementation:* In most MoE layers each token in a batch and
+sequence is computed independently. Typically the first step in an MoE
+implementation consists of flattening the sequences in a batch into a single
+flat list of tokens. These tokens are then routed to potentially multiple
+experts and finally reduced (if each token is routed to multiple experts) —
+typically via a weighted sum. Each expert consists of a two stage MLP with a
+gate projection, up projection followed by down projection layer.
+
+$$
+z_i = \text{silu}(x_i W_\text{gate}) \cdot (x_i W_\text{up}) \cdot W_\text{down}
+$$
+
+While multiple implementations are possible, our MoE implementation relies on
+the **ragged dot** subroutine defined as multiplying a ragged (packed) 2D
+left-hand side and a dense 3D stack of 2D matrices on the right hand side with a
+list of sequence lengths in the packed left-hand side representation.
+
+$$
+\left( x \in \mathbb{R}^{\left(\sum_i g_i\right) \times k} \right) \cdot \left( A \in \mathbb{R}^{e \times k \times n} \right) = y \in \mathbb{R}^{\left(\sum_i g_i\right) \times n} ~~~ \text{where} ~~~ g \in \mathbb{N}^e
+$$
+
+For example, $g_0 = 3$ implies that the first 3 rows of $x$ should be multiplied
+by the first matrix in the stack $A[0, :, :]$ and placed in the first 3 rows of
+$y$. Next, if $g_1 = 5$ the next 5 rows of $x_i$ should be multiplied by $A[1,
+:, :]$ and placed in the next 5 rows of $y$, i.e., $y[3:8, :]$.
+
+Relying on ragged dot requires sorting the tokens after routing because ragged
+dot expects packed contiguous groups of tokens. This leads to our implementation:
+
+1. route tokens to experts
+2. sort tokens into contiguous expert groups
+3. apply ragged dot to gate, up projection
+4. apply ragged dot to down projection
+5. inverse sort tokens back to the original order
+6. reduce tokens across the n experts each token was routed to via a weighted sum
+
+The sharding strategy of this MoE implementation then looks as follows
+
+1. route tokens to experts
+    - if in prefill, shard tokens along the batch/sequence to avoid duplicating routing work
+2. shard expert dimensions, devices lack experts for some tokens, simply fill the outputs with zeros
+    - place the tokens for which experts are missing on this device at the end of the sorted list
+    - if dropless, maintain the full token list
+    - if dropping, truncate the token list at a static length (tokens without experts are last and so are dropped), e.g. 2 $\times$ batch size multiplied by the fraction of experts a single device holds
+3. apply ragged dot to gate, up projection
+    - the ragged dot operator already supports sparsity, so we rely on it not computing tokens not assigned to any experts (on this device)
+4. apply ragged dot to down projection
+    - the ragged dot operator already supports sparsity, so we rely on it not computing tokens not assigned to any experts (on this device)
+- if dropless
+
+  5. if dropless inverse sort the tokens, zeros are already present in the tokens for which this device is missing experts
+
+  6. reduce tokens across the n experts each token was routed to via a weighted sum
+      - tokens for which experts are missing are equal to zero so the reduction yields correct results
+
+- if dropping
+
+  5. prepare a buffer equal to the size of the full token list and scatter-add tokens for which this device has experts into the buffer
+      - this combines the inverse token sort with weighted reduction of tokens across n experts
+
+The output then needs to be communicated across expert shards. Standard tensor
+parallelism is fully compatible with this implementation because it can be
+applied across columns or rows of the stacked matrices in the ragged dot
+operation.
+
+In the specific case of Deepseek V3/R1 MoE, since the expert layers are small,
+$E_{=256}D_{=7168}F_{=2048}$ and TPUs work best when the minor-most dimensions
+is $\geq 128$, we can only shard the expert matrices among $16$ devices mesh
+axis ($16 \cdot 128 = 2048$). For the other axis in the mesh the only other
+shardable dimension is the expert dimension.
 
 For an all-reduce matmul sharding strategy we end up with the following sharding:
 

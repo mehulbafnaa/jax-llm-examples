@@ -7,3 +7,4 @@ Current contents include:
 
 * [DeepSeek R1](deepseek_r1_jax/)
 * [Llama 4](llama4/)
+* [Llama 3](llama3/)

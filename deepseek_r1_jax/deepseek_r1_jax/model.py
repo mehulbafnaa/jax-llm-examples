@@ -36,7 +36,6 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from .decode_ragged_dot import decode_ragged_dot
 
 
-map, builtin_map = jax.util.safe_map, map
 AxisName = str | tuple[str, ...] | None
 Axes = tuple[AxisName, ...]
 

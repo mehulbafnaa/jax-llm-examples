@@ -34,7 +34,6 @@ from etils import epath
 
 from . import ragged_attention
 
-map, builtin_map = jax.util.safe_map, map
 AxisName = str | tuple[str, ...] | None
 Axes = tuple[AxisName, ...]
 

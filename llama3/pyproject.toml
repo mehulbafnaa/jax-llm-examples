@@ -42,5 +42,8 @@ ignore = [
     "E731", # lambdas expression instead of def
 ]
 
+[tool.setuptools]
+packages = ["llama3_jax"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["pyproject.toml"] }

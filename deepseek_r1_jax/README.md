@@ -393,7 +393,7 @@ Fig: Decode profile for an MoE Layer with batch size = 8 and context length of 2
 
 ## Working with multi-host clusters
 
-For detailed instructions on setting up and working with multi-host clusters, please refer to the [Multi-Host Clusters section](../../README.md#working-with-multi-host-clusters) in the main README.
+For detailed instructions on setting up and working with multi-host clusters, please refer to the [Multi-Host Cluster Setup](../multi_host_README.md) at the top level of this repository.
 
 ## Next steps
 

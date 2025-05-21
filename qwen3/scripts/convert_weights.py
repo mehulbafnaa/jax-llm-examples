@@ -12,7 +12,7 @@ def main(model_path: str | Path, ckpt_path: str | Path):
         from qwen3_jax import model as q3jax
         from qwen3_jax import chkpt_utils as utils
     except ImportError:
-        sys.path.append(str(Path(__file__).parent.absolute()))
+        sys.path.append(str(Path(__file__).parents[1].absolute()))
 
         from qwen3_jax import model as q3jax
         from qwen3_jax import chkpt_utils as utils

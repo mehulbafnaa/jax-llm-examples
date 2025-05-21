@@ -3,15 +3,14 @@
 from argparse import ArgumentParser
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
-
 example_models = [
   "meta-llama/Llama-4-Scout-17B-16E-Instruct",
   "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
 ]
 
-
 def main(model_id: str, dest_root_path: str | Path):
+    from huggingface_hub import snapshot_download
+
     local_dir = Path(dest_root_path).expanduser().absolute() / str(model_id).replace("/", "--")
     snapshot_download(repo_id=model_id, local_dir=local_dir)
 

@@ -4,15 +4,15 @@ import sys
 from pathlib import Path
 from argparse import ArgumentParser
 
-try:
-    from llama4_jax import chkpt_utils as utils
-except ImportError:
-    sys.path.append(str(Path(__file__).parent.absolute()))
-
-    from llama4_jax import chkpt_utils as utils
-
 
 def main(path: str | Path, suffix: str):
+    try:
+        from llama4_jax import chkpt_utils as utils
+    except ImportError:
+        sys.path.append(str(Path(__file__).parents[1].absolute()))
+
+        from llama4_jax import chkpt_utils as utils
+
     path = Path(path).expanduser().absolute()
     dest_path = path.parent / f"{path.name}{suffix}"
     utils.quantize_model(path, dest_path)

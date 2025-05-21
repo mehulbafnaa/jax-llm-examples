@@ -4,14 +4,11 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 example_models = [
-  "Qwen/Qwen3-0.6B",
-  "Qwen/Qwen3-1.7B",
-  "Qwen/Qwen3-4B",
-  "Qwen/Qwen3-8B",
-  "Qwen/Qwen3-14B",
-  "Qwen/Qwen3-32B",
-  "Qwen/Qwen3-30B-A3B",
-  "Qwen/Qwen3-235B-A22B",
+  "meta-llama/Llama-3.1-8B-Instruct",
+  "meta-llama/Llama-3.1-70B-Instruct",
+  "meta-llama/Llama-3.1-405B-Instruct",
+  "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 ]
 
 

@@ -38,7 +38,7 @@
 
 # extra args to ssh, MUST START WITH "--" or be empty, e.g., "-- -J my_proxy_jump_server"
 SSH_EXTRA_ARGS=""
-SSH_EXTRA_ARGS=(${(z)SSH_ARGS})  
+SSH_EXTRA_ARGS=(${(z)SSH_ARGS})
 
 # Example usage:
 
@@ -78,7 +78,7 @@ SSH_EXTRA_ARGS=(${(z)SSH_ARGS})
 
 tpu_describe() {
   gcloud alpha compute tpus tpu-vm describe "$TPU_NAME" \
-    --zone="$TPU_ZONE" --project="$TPU_PROJECT" | rg externalIp | tee .tpu_ips
+    --zone="$TPU_ZONE" --project="$TPU_PROJECT" | rg externalIp | tee .tpu_ips.log
 }
 
 tpu_ssh_exec() {
@@ -122,6 +122,28 @@ tpu_setup_all() {  # combined setup function
   _tpu_setup_gcloud_and_gcsfuse || { echo "_tpu_setup_gcloud_and_gcsfuse failed"; return 1; }
 }
 
+tpu_create() {
+  # for image selection see: https://cloud.google.com/tpu/docs/v5e and https://cloud.google.com/tpu/docs/v6e
+  # $ tpu_create v5litepod-64
+  local tpu_accel="${1:?"Provide the TPU accelerator type to create, e.g. v5litepod-64, v6e-8"}"
+  local tpu_image="${2:-}"
+  if [[ "$tpu_accel" == v5litepod* ]]; then
+    tpu_image="v2-alpha-tpuv5-lite" && echo "Guessing the TPU VM image to be '$tpu_image'"
+  elif [[ "$tpu_accel" == v6e* ]]; then
+    tpu_image="v2-alpha-tpuv6e" && echo "Guessing the TPU VM image to be '$tpu_image'"
+  fi
+  [[ "$tpu_image" == "" ]] && echo "You must specify the VM image explicitly for accelerator-type=$tpu_accel" && return 1
+
+  gcloud compute tpus tpu-vm create "$TPU_NAME" \
+    --zone="$TPU_ZONE" --project="$TPU_PROJECT" --accelerator-type="$tpu_accel" \
+    --version="$tpu_image" --spot
+  tpu_describe #  run describe to get external ips
+}
+
+tpu_delete() {
+  echo "Deleting $TPU_NAME"
+  gcloud compute tpus tpu-vm delete "$TPU_NAME" --zone="$TPU_ZONE" --project="$TPU_PROJECT" --quiet
+}
 
 ################################################################################
 # helper functions follow, no need to call them manually #######################
@@ -193,7 +215,7 @@ sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled"
 python3 -m pip install -U uv; python3 -m uv venv --seed --python 3.12 "$HOME/venv"
 . "$HOME/venv/bin/activate"
 echo ". ~/venv/bin/activate" >> ~/.bashrc; echo ". ~/venv/bin/activate" >> ~/.zshrc
-pip install -U "jax[tpu]" ipyparallel ipykernel ipywidgets uv
+pip install -U uv pip && uv pip install -U "jax[tpu]" ipyparallel ipykernel ipywidgets
 EOM
 )
   tpu_ssh_exec "$INSTALL_PYTHON"

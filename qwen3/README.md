@@ -59,8 +59,8 @@ Responses:
 ```
 Responses:
 [
-  "<think>\nOkay, the user is asking for my name. I need to respond clearly. My name is Qwen, and I'm a large language model developed", 
-  '<think>\nOkay, the user is asking for the weather described in long prose in Old English. First, I need to recall what Old English is like. It', 
+  "<think>\nOkay, the user is asking for my name. I need to respond clearly. My name is Qwen, and I'm a large language model developed",
+  '<think>\nOkay, the user is asking for the weather described in long prose in Old English. First, I need to recall what Old English is like. It',
   '<think>\nOkay, the user is asking, "Do you like ice cream, be extremely precise." Hmm, first, I need to remember that I\'m an'
 ]
 ```
@@ -108,7 +108,7 @@ memory-bandwidth use in inference.
   (e.g. heavy use of custom kernels). In addition, this example only uses
   well-known optimization strategies, and does not aim to introduce any new or
   closed-source techniques that inference providers may have independently developed.
-  
+
 
 
 #### TPU Optimizations
@@ -124,7 +124,7 @@ memory-bandwidth use in inference.
 - Q: Which TPU image to use?
 
   A: For v5e: `v2-alpha-tpuv5-lite`, for v6e: `v2-alpha-tpuv6e`. See [runtimes](https://cloud.google.com/tpu/docs/runtimes).
-  
+
 #### Custom Kernels
 
 TODO
@@ -132,12 +132,12 @@ TODO
 ## Transformer parallelism strategies
 
 This section overviews different sharding strategies and their performance considerations for Transformer architectures in general.
-For a very in-depth guide on this topic, check out [How to Scale Your Model](https://jax-ml.github.io/scaling-book/). 
+For a very in-depth guide on this topic, check out [How to Scale Your Model](https://jax-ml.github.io/scaling-book/).
 The next section goes over Qwen3-specific optimizations.
 
 A typical decoder-only transformer consists of
 
-1. An input embedding 
+1. An input embedding
     - a single weight $V \times D$
 2. Repeated Decoder Layers (Attention + a Feed-forward layer)
     * Attention Layer
@@ -147,11 +147,11 @@ A typical decoder-only transformer consists of
     * Feed-forward Layer - a Multilayer Perceptron (MLP) or a Mixture-of-Experts (MoE)
         - always (i) up-projection -> (ii) nonlinearity -> (iii) down-projection
         - MLP
-            - up-projection: $BSD \times DF \rightarrow BSF$ 
+            - up-projection: $BSD \times DF \rightarrow BSF$
             - down-projection: $BSF \times DF \rightarrow BSD$
         - MoE
             - each token in $BS$ can be routed to a matrix slice $EDF[\text{idx}, :, :]$
-            - up-projection: $BSD \times EDF \rightarrow BSF$ 
+            - up-projection: $BSD \times EDF \rightarrow BSF$
             - down-projection: $BSF \times EDF \rightarrow BSD$
 3. An output projection
     - a single weight $D \times V$

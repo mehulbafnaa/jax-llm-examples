@@ -1,0 +1,17 @@
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "W291",
+]
+ignore = [
+    "E731",  # lambdas expression instead of def
+    "E741",  # allow 'l' as a variable name
+    "E402",  # allow module imports not at top of file
+    "F841",  # allow unused variables
+]

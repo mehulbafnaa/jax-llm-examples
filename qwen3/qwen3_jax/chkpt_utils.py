@@ -18,7 +18,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import dataclasses
-from typing import Any, Callable
+from typing import Callable
 
 import jax
 from jax import numpy as jnp
@@ -74,7 +74,7 @@ def _index_to_str(x):
         if hasattr(x, field):
             return str(getattr(x, field))
     raise ValueError
-    
+
 def _stack_experts(params: dict[str, torch.Tensor]):
   key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))
   params = dict(params)

@@ -178,7 +178,7 @@ class Config:
 
 def load_tokenizer(
     tokenizer_path: Path | None = None, tokenizer_config_path: Path | None = None
-) -> "PreTrainedTokenizerFast":
+) -> "PreTrainedTokenizerFast":  # noqa: F821
     from transformers import PreTrainedTokenizerFast
 
     if tokenizer_path is not None:
@@ -291,7 +291,8 @@ def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=
         raise ValueError("Attempting to quantize an already quantized QuantArray.")
 
     if isinstance(x, jax.Array):
-        if not isinstance(axis, tuple): axis = (axis,)
+        if not isinstance(axis, tuple):
+            axis = (axis,)
         axis = tuple(z % x.ndim for z in axis)
         amax = jnp.max(jnp.abs(x), axis=axis, keepdims=True)
         scale = (amax / 127.0 + jnp.finfo(scale_dtype).tiny).astype(scale_dtype)
@@ -300,7 +301,8 @@ def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=
         return quant, scale
 
     if is_type(x, ArrayInfo):
-        if not isinstance(axis, tuple): axis = (axis,)
+        if not isinstance(axis, tuple):
+            axis = (axis,)
         axis = tuple(z % len(x.shape) for z in axis)
         new_shape = tuple(ax for i, ax in enumerate(x.shape) if i not in axis)
         new_logical_axes = tuple(ax for i, ax in enumerate(x.logical_axes) if i not in axis)
@@ -835,7 +837,7 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
             in_axes += ((None if k_scale is None else 1),)
             in_axes += ((None if v_scale is None else 1),)
             hyperparams = dict(scale=scale, block_kv=min(k.shape[-2], 8192))
-            ret = jax.vmap(partial(ragged_attention.ragged_decode_fwd, **hyperparams), in_axes=in_axes, out_axes=1)(
+            ret = jax.vmap(partial(ragged_attention.ragged_decode_fwd, **hyperparams), in_axes=in_axes, out_axes=1)(  # noqa: F821
                 q, k, v, starts, lengths, k_scale, v_scale
             )
         return ret.reshape(q_org_shape[:-1] + (v.shape[-1],))
@@ -1020,7 +1022,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
 
     in_specs = (x_spec, we_gate_spec, we_up_spec, we_down_spec, topk_weights_spec, topk_idx_spec)
 
-    is_embedding_sharded = not (l2p("act_embed")[0] is None)
+    is_embedding_sharded = l2p("act_embed")[0] is not None
     if is_embedding_sharded:  # activations are sharded
         out_spec = P(*(out_spec[:-1] + (tensor_axname,)))  # override last axis name
     if cfg.strategy == "prefill":

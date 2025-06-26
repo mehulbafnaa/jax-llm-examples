@@ -21,6 +21,7 @@ from pathlib import Path
 import math
 from functools import partial
 from typing import Callable, Any, TypeVar
+from inspect import signature
 
 import jax
 import jax.numpy as jnp
@@ -29,7 +30,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, use_mesh
-from jax.experimental.shard import auto_axes, reshard
+from jax.experimental.shard import auto_axes as _auto_axes, reshard
 from etils import epath
 
 from . import ragged_attention
@@ -81,6 +82,11 @@ class ShardingRules:
     # vocab
     vocab_in: AxisName = None
     vocab_out: AxisName = TENSOR_AXIS_NAME
+
+
+def auto_axes(x, out_sharding):  # TOOD(rdyro): remove once in JAX >= 0.7.0
+    argname = "out_sharding" if "out_sharding" in signature(_auto_axes).parameters else "out_shardings"
+    return _auto_axes(x, **{argname: out_sharding})
 
 
 def logical_to_physical(logical: Axes, rules: ShardingRules) -> jax.sharding.PartitionSpec:
@@ -198,10 +204,10 @@ class ArrayInfo:
 is_type = lambda x, cls: (type(x).__name__ == cls.__name__) and (type(x).__module__ == cls.__module__)
 is_param = lambda x: is_type(x, ArrayInfo)
 _count_left_padding = lambda ids, pad_id=0: auto_axes(
-    lambda ids: jnp.sum(jnp.cumsum(ids != pad_id, axis=-1) == 0, axis=-1), out_shardings=P(None)
+    lambda ids: jnp.sum(jnp.cumsum(ids != pad_id, axis=-1) == 0, axis=-1), out_sharding=P(None)
 )(ids)
 _length_minus_padding = lambda segment_ids: auto_axes(
-    lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_shardings=P(None)
+    lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 
 
@@ -263,7 +269,7 @@ def einsum(subscripts: str, lhs: jax.Array, rhs: jax.Array | QuantArray, out_sha
         return jnp.einsum(subscripts, lhs, rhs, out_sharding=out_sharding)
 
 
-def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=jnp.float16):
+def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=jnp.float16, zero_init: bool = False):
     if is_type(x, QuantArray):
         raise ValueError("Attempting to quantize an already quantized QuantArray.")
     if not isinstance(axis, (list, tuple)):
@@ -281,10 +287,14 @@ def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=
     if is_type(x, ArrayInfo):
         new_shape = tuple(ax for i, ax in enumerate(x.shape) if i not in axis)
         new_logical_axes = tuple(ax for i, ax in enumerate(x.logical_axes) if i not in axis)
-        quant = dataclasses.replace(x, shape=x.shape, dtype=jnp.int8, initializer=jax.nn.initializers.zeros)
-        scale = ArrayInfo(
-            new_shape, scale_dtype, new_logical_axes, jax.nn.initializers.ones, metadata={"quant_axis": axis}
-        )
+        if zero_init:
+            quant_init, scale_init = jax.nn.initializers.zeros, jax.nn.initializers.ones
+        else:
+            quant_init = lambda key, shape, dtype=jnp.int8: jax.random.randint(key, shape, -128, 128, dtype=dtype)
+            scale_init = lambda key, shape, dtype=scale_dtype: (jax.random.uniform(key, shape, dtype=dtype)
+                                                                / math.sqrt(math.prod(shape)) / 127)
+        quant = dataclasses.replace(x, shape=x.shape, dtype=jnp.int8, initializer=quant_init)
+        scale = ArrayInfo(new_shape, scale_dtype, new_logical_axes, scale_init, metadata={"quant_axis": axis})
         return quant, scale
     raise ValueError(f"quantize got unexpected type: {type(x)}")
 
@@ -404,15 +414,15 @@ class KVCache(_Init):
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), jax.nn.initializers.zeros),
         )
         if cfg.quant_cache:
-            dtype = cfg.quant_scale_dtype
+            _quantize = partial(quantize, axis=-1, scale_dtype=cfg.quant_scale_dtype, zero_init=True)
             cache = dataclasses.replace(
                 cache,
                 k=[
-                    QuantArray(*quantize(cache.k[idx], -1, dtype), out_scaling=True, scale_expand_dims=(-2, -3))
+                    QuantArray(*_quantize(cache.k[idx]), out_scaling=True, scale_expand_dims=(-2, -3))
                     for idx in range(len(cache.k))
                 ],
                 v=[
-                    QuantArray(*quantize(cache.v[idx], -1, dtype), out_scaling=False, scale_expand_dims=(-2, -3))
+                    QuantArray(*_quantize(cache.v[idx]), out_scaling=False, scale_expand_dims=(-2, -3))
                     for idx in range(len(cache.v))
                 ],
             )
@@ -575,7 +585,7 @@ def _attention(
     return qkv.reshape((b, qh, t, d))
 
 
-attention = auto_axes(_attention, out_shardings=P(BATCH_AXIS_NAME, TENSOR_AXIS_NAME, None, None))
+attention = auto_axes(_attention, out_sharding=P(BATCH_AXIS_NAME, TENSOR_AXIS_NAME, None, None))
 
 
 def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, lengths, cfg: Config):

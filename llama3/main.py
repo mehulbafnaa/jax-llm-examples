@@ -40,10 +40,10 @@ def encode_input(tokenizer, texts: list[str], model_name: str, pad_id: int = 0):
 
 
 if __name__ == "__main__":
-    jax.distributed.initialize()
+    #jax.distributed.initialize()  # if you want to run multi-host
     quant = True
 
-    ckpt_path = epath.Path("~/bucket/DeepSeek-R1-Distill-Llama-3.1-70B-Instruct").expanduser()
+    ckpt_path = epath.Path("~/bucket/llama3_jax/DeepSeek-R1-Distill-Llama-3.1-8B-Instruct").expanduser()
     if quant:
         ckpt_path = ckpt_path.parent / f"{ckpt_path.name}-quant"
     tokenizer = l3jax.load_tokenizer(ckpt_path / "tokenizer.json", ckpt_path / "tokenizer_config.json")

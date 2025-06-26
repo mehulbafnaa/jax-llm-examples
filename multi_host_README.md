@@ -52,4 +52,4 @@ All setup and management commands for multi-host clusters are provided in the [`
 
 ---
 
-For all setup and management commands, see [`misc/tpu_toolkit.sh`](./misc/tpu_toolkit.sh). 
+For all setup and management commands, see [`misc/tpu_toolkit.sh`](./misc/tpu_toolkit.sh).

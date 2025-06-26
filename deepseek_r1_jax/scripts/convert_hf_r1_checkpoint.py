@@ -34,10 +34,9 @@ def main():
 
     rules = ShardingRules(*(None for _ in dataclasses.fields(ShardingRules)))  # fully replicated
     cfg = dataclasses.replace(cfg, mesh=jax.make_mesh((1,), P("x")), rules=rules)
-    params_map = json.loads(gzip.decompress((Path(__file__).parent.absolute() 
+    params_map = json.loads(gzip.decompress((Path(__file__).parent.absolute()
                                              / "r1_hf_ckpt_params_map.json.gz").read_bytes()))
     utils.convert_hf_checkpoint(params_map, root_path, dest_path, cfg)
 
 if __name__ == "__main__":
     main()
-

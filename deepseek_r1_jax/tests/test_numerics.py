@@ -36,9 +36,7 @@ from deepseek_r1_jax import chkpt_utils as utils
 
 config = deepseek.DeepseekV3Config()
 cfg = utils.convert_config(config)
-config_json = json.loads(
-    (Path(__file__).parents[1] / "deepseek_r1_jax" / "third_party" / "r1_config.json").read_text()
-)
+config_json = json.loads((Path(__file__).parents[1] / "deepseek_r1_jax" / "third_party" / "r1_config.json").read_text())
 config.rope_scaling = config_json["rope_scaling"]
 config.rope_scaling_factor = config_json["rope_scaling"]["factor"]
 config.rope_scaling_type = config_json["rope_scaling"]["type"]
@@ -78,6 +76,7 @@ cfg_small = dataclasses.replace(
     ffw_size=config_small.intermediate_size,
     num_layers=config_small.num_hidden_layers,
 )
+
 
 def _set_seed(seed):
     np.random.seed(seed), torch.manual_seed(seed), pyrandom.seed(seed)
@@ -310,9 +309,7 @@ class TestNumerics(parameterized.TestCase):
             cache = None
 
         ret1 = jax.jit(dsjax.forward)(input, segment_ids=segment_ids, weights=weights, cfg=cfg_small, cache=cache)
-        ret3 = jax.jit(dsjax.forward)(
-            input, segment_ids=segment_ids, weights=weights_quant, cfg=cfg_quant, cache=cache
-        )
+        ret3 = jax.jit(dsjax.forward)(input, segment_ids=segment_ids, weights=weights_quant, cfg=cfg_quant, cache=cache)
 
         y1 = ret1 if not use_cache else ret1[0]
         y3 = ret3 if not use_cache else ret3[0]

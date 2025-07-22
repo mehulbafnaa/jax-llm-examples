@@ -1,5 +1,5 @@
 [project]
-name = "deeseek_r1_jax"
+name = "deepseek_r1_jax"
 version = "0.1.0"
 description = "Fast, cheap, and minimal Deepseek R1 inference in JAX"
 authors = [

@@ -179,10 +179,9 @@ def decode_ragged_dot(
       return (i - 1, idx), idx
 
     rhs_work_mask = jnp.sum(group_sizes.reshape((-1, block_g)), -1) > 0
-    flipped_rhs_work_mask = jnp.flip(rhs_work_mask, -1)
-    last_idx_mask = jnp.flip((jnp.cumsum(flipped_rhs_work_mask, -1) == 1) & flipped_rhs_work_mask, -1)
-    last_idx = jnp.sum(jnp.arange(grid[0], dtype=jnp.int32) * last_idx_mask)
-    rhs_idx_map = jnp.flip(jax.lax.scan(_compute_rhs_idx, (grid[0] - 1, last_idx), flipped_rhs_work_mask)[1], -1)
+    unique_rhs_groups = jnp.sort(jnp.arange(rhs_work_mask.shape[-1]) * rhs_work_mask, descending=True)
+    flipped_rhs_groups_mapping = jnp.maximum(jnp.cumsum(jnp.flip(rhs_work_mask, axis=-1)) - 1, 0)
+    rhs_idx_map = jnp.flip(unique_rhs_groups[flipped_rhs_groups_mapping], axis=-1)
 
     def lhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
         # as opposed to: `return j, 0`

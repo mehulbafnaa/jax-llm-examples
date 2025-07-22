@@ -25,6 +25,7 @@ from inspect import signature
 
 import jax
 import jax.numpy as jnp
+from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
@@ -122,8 +123,8 @@ def logical_to_sharding(logical: Axes, mesh: jax.sharding.Mesh, rules: ShardingR
 
 def jax_pytree_struct(cls, meta_fields: tuple = ()):
     """jax.tree_util.register_dataclass wrapper that automatically infers data_fields."""
-    assert not dataclasses.is_dataclass(cls)
-    cls = dataclasses.dataclass(cls)
+    if not dataclasses.is_dataclass(cls):
+        cls = dataclasses.dataclass(cls)
     all_fields = tuple(f.name for f in dataclasses.fields(cls) if f.init)
     data_fields = tuple(f for f in all_fields if f not in meta_fields)
     return tree_util.register_dataclass(cls, data_fields=data_fields, meta_fields=meta_fields)
@@ -214,13 +215,13 @@ def load_tokenizer(
     return PreTrainedTokenizerFast(tokenizer_file=str(tokenizer_path), **config)
 
 
-@partial(jax_pytree_struct, meta_fields=("shape", "logical_axes", "initializer", "metadata"))
+@partial(jax_pytree_struct, meta_fields=("shape", "logical_axes", "initializer"))
+@dataclasses.dataclass(frozen=True)
 class ArrayInfo:
     shape: tuple[int, ...]
     dtype: "jnp.dtype"
     logical_axes: tuple
     initializer: Callable | None = None
-    metadata: dict = dataclasses.field(default_factory=dict)
 
 
 # module reload friendly isinstance check
@@ -233,6 +234,18 @@ _length_minus_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
+
+
+@partial(jax.jit, static_argnames=("abstract", "shardings"))
+def _init_leaves(key, abstract, shardings):
+    @partial(jax.jit, out_shardings=shardings)
+    def _init_fn(key):
+        num_leaves = len(jax.tree.leaves(abstract, is_leaf=is_param))  # one new RNG key per tensor
+        key_iter = iter(random.split(key, num_leaves))
+        return jax.tree.map(
+            lambda info: info.initializer(next(key_iter), info.shape, info.dtype), abstract, is_leaf=is_param
+        )
+    return _init_fn(key)
 
 
 class _Init:
@@ -250,25 +263,15 @@ class _Init:
         )
 
     @classmethod
-    def init(cls, key: jax.random.PRNGKey, cfg: Config, *args, **kw):
+    def init(cls, key: random.PRNGKey, cfg: Config, *args, **kw):
+        """Returns a pytree of randomly-initialized jax.Arrays corresponding to abstract()."""
         abstract = cls.abstract(cfg, *args, **kw)
         shardings = jax.tree.map(
-            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules),
-            abstract,
-            is_leaf=is_param,
+            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules), abstract, is_leaf=is_param
         )
-
-        @partial(jax.jit, out_shardings=shardings)
-        def _init():
-            num_leaves = len(jax.tree.leaves(abstract, is_leaf=is_param))  # one new RNG key per tensor
-            key_iter = iter(jax.random.split(key, num_leaves))
-            return jax.tree.map(
-                lambda info: info.initializer(next(key_iter), info.shape, info.dtype),
-                abstract,
-                is_leaf=is_param,
-            )
-
-        return _init()
+        abstract_leaves, abstract_struct = jax.tree.flatten(abstract, is_leaf=is_param)
+        shardings_leaves = jax.tree.leaves(shardings, is_leaf=is_param)
+        return jax.tree.unflatten(abstract_struct, _init_leaves(key, tuple(abstract_leaves), tuple(shardings_leaves)))
 
 
 @partial(jax_pytree_struct, meta_fields=("out_scaling", "scale_expand_dims"))
@@ -292,6 +295,8 @@ def einsum(subscripts: str, lhs: jax.Array, rhs: jax.Array | QuantArray, out_sha
     else:
         return jnp.einsum(subscripts, lhs, rhs, out_sharding=out_sharding)
 
+_int8_quant_init = lambda key, shape, dtype=jnp.int8: random.randint(key, shape, -128, 128, dtype=dtype)
+_int8_scale_init = lambda key, shape, dtype: random.normal(key, shape, dtype=dtype) / math.sqrt(math.prod(shape)) / 127
 
 def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=jnp.bfloat16, zero_init: bool = False):
     if is_type(x, QuantArray):
@@ -314,11 +319,9 @@ def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=
         if zero_init:
             quant_init, scale_init = jax.nn.initializers.zeros, jax.nn.initializers.ones
         else:
-            quant_init = lambda key, shape, dtype=jnp.int8: jax.random.randint(key, shape, -128, 128, dtype=dtype)
-            scale_init = lambda key, shape, dtype=scale_dtype: (jax.random.uniform(key, shape, dtype=dtype)
-                                                                / math.sqrt(math.prod(shape)) / 127)
+            quant_init, scale_init = _int8_quant_init, _int8_scale_init
         quant = dataclasses.replace(x, shape=x.shape, dtype=jnp.int8, initializer=quant_init)
-        scale = ArrayInfo(new_shape, scale_dtype, new_logical_axes, scale_init, metadata={"quant_axis": axis})
+        scale = ArrayInfo(new_shape, scale_dtype, new_logical_axes, scale_init)
         return quant, scale
     raise ValueError(f"quantize got unexpected type: {type(x)}")
 

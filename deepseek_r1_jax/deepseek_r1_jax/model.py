@@ -117,8 +117,8 @@ def logical_to_sharding(logical: Axes, mesh: jax.sharding.Mesh, rules: ShardingR
 
 def jax_pytree_struct(cls, meta_fields: tuple = ()):
     """jax.tree_util.register_dataclass wrapper that automatically infers data_fields."""
-    assert not dataclasses.is_dataclass(cls)
-    cls = dataclasses.dataclass(cls)
+    if not dataclasses.is_dataclass(cls):
+        cls = dataclasses.dataclass(cls)
     all_fields = tuple(f.name for f in dataclasses.fields(cls) if f.init)
     data_fields = tuple(f for f in all_fields if f not in meta_fields)
     return tree_util.register_dataclass(cls, data_fields=data_fields, meta_fields=meta_fields)
@@ -210,7 +210,8 @@ is_param = lambda x: is_type(x, ArrayInfo)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
 
 
-@partial(jax_pytree_struct, meta_fields=("shape", "dtype", "logical_axes", "initializer", "metadata"))
+@partial(jax_pytree_struct, meta_fields=("shape", "dtype", "logical_axes", "initializer"))
+@dataclasses.dataclass(frozen=True)
 class ArrayInfo:
     """Metadata describing a jax.Array, including its sharding.
 
@@ -225,7 +226,18 @@ class ArrayInfo:
     dtype: "jnp.dtype"
     logical_axes: tuple
     initializer: Callable | None = None
-    metadata: dict = field(default_factory=dict)
+
+
+@partial(jax.jit, static_argnames=("abstract", "shardings"))
+def _init_leaves(key, abstract, shardings):
+    @partial(jax.jit, out_shardings=shardings)
+    def _init_fn(key):
+        num_leaves = len(jax.tree.leaves(abstract, is_leaf=is_param))  # one new RNG key per tensor
+        key_iter = iter(random.split(key, num_leaves))
+        return jax.tree.map(
+            lambda info: info.initializer(next(key_iter), info.shape, info.dtype), abstract, is_leaf=is_param
+        )
+    return _init_fn(key)
 
 
 class _Init:
@@ -254,26 +266,15 @@ class _Init:
         )
 
     @classmethod
-    def init(cls, key: jax.random.PRNGKey, cfg: Config, *args, **kw):
+    def init(cls, key: random.PRNGKey, cfg: Config, *args, **kw):
         """Returns a pytree of randomly-initialized jax.Arrays corresponding to abstract()."""
         abstract = cls.abstract(cfg, *args, **kw)
         shardings = jax.tree.map(
-            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules),
-            abstract,
-            is_leaf=is_param,
+            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules), abstract, is_leaf=is_param
         )
-
-        @partial(jax.jit, out_shardings=shardings)
-        def _init():
-            num_leaves = len(jax.tree.leaves(abstract, is_leaf=is_param))  # one new RNG key per tensor
-            key_iter = iter(jax.random.split(key, num_leaves))
-            return jax.tree.map(
-                lambda info: info.initializer(next(key_iter), info.shape, info.dtype),
-                abstract,
-                is_leaf=is_param,
-            )
-
-        return _init()
+        abstract_leaves, abstract_struct = jax.tree.flatten(abstract, is_leaf=is_param)
+        shardings_leaves = jax.tree.leaves(shardings, is_leaf=is_param)
+        return jax.tree.unflatten(abstract_struct, _init_leaves(key, tuple(abstract_leaves), tuple(shardings_leaves)))
 
 
 @partial(jax_pytree_struct, meta_fields=("out_scaling", "scale_expand_dims"))
@@ -285,8 +286,10 @@ class QuantArray:
     shape = property(lambda self: self.quant.shape)
     ndim = property(lambda self: self.quant.ndim)
 
+_int8_quant_init = lambda key, shape, dtype=jnp.int8: random.randint(key, shape, -128, 128, dtype=dtype)
+_int8_scale_init = lambda key, shape, dtype: random.normal(key, shape, dtype=dtype) / math.sqrt(math.prod(shape)) / 127
 
-def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=jnp.float16):
+def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=jnp.float16, zero_init: bool = False):
     if is_type(x, QuantArray):
         raise ValueError("Attempting to quantize an already quantized QuantArray.")
 
@@ -306,15 +309,13 @@ def quantize(x: jax.Array | ArrayInfo, axis: int | tuple[int, ...], scale_dtype=
         axis = tuple(z % len(x.shape) for z in axis)
         new_shape = tuple(ax for i, ax in enumerate(x.shape) if i not in axis)
         new_logical_axes = tuple(ax for i, ax in enumerate(x.logical_axes) if i not in axis)
-        quant_init = lambda key, shape, dtype=jnp.int8: random.randint(key, shape, -128, 128, dtype=dtype)
-        scale_init = (
-            lambda key, shape, dtype=scale_dtype: random.normal(key, shape, dtype=dtype)
-            / math.sqrt(math.prod(shape))
-            / 127
-        )
+        if zero_init:
+            quant_init, scale_init = jax.nn.initializers.zeros, jax.nn.initializers.ones
+        else:
+            quant_init, scale_init = _int8_quant_init, _int8_scale_init
         return (
             dataclasses.replace(x, shape=x.shape, dtype=jnp.int8, initializer=quant_init),
-            ArrayInfo(new_shape, scale_dtype, new_logical_axes, scale_init, metadata={"quant_axis": axis}),
+            ArrayInfo(new_shape, scale_dtype, new_logical_axes, scale_init)
         )
 
     raise ValueError(f"quantize got unexpected type: {type(x)}")
@@ -600,17 +601,17 @@ class KVCache(_Init):
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), _init),
         )
         if cfg.quantize_cache:
-            scale_dtype = cfg.quant_scale_dtype
+            _quantize = partial(quantize, axis=-1, scale_dtype=cfg.quant_scale_dtype, zero_init=True)
             cache.k_nope = [
-                QuantArray(*quantize(k_nope, -1, scale_dtype), out_scaling=True, scale_expand_dims=-2)
+                QuantArray(*_quantize(k_nope), out_scaling=True, scale_expand_dims=-2)
                 for k_nope in cache.k_nope
             ]
             cache.k_pe = [
-                QuantArray(*quantize(k_pe, -1, scale_dtype), out_scaling=True, scale_expand_dims=(-2, -3))
+                QuantArray(*_quantize(k_pe), out_scaling=True, scale_expand_dims=(-2, -3))
                 for k_pe in cache.k_pe
             ]
             cache.v = [
-                QuantArray(*quantize(v, -1, scale_dtype), out_scaling=False, scale_expand_dims=-2)
+                QuantArray(*_quantize(v), out_scaling=False, scale_expand_dims=-2)
                 for v in cache.v
             ]
         return cache
@@ -705,10 +706,8 @@ def generate_pos_embeddings(positions, head_dim, cfg: Config):
 def apply_rotary_embedding(x, sin, cos):
     assert x.ndim == 4
     assert sin.ndim == 3 and cos.ndim == 3
-    sin, cos = (
-        sin[:, None, :, :],
-        cos[:, None, :, :],
-    )  # [B, T, head_dim] -> [B, h, T, head_dim]
+    # [B, T, head_dim] -> [B, h, T, head_dim]
+    sin, cos = (sin[:, None, :, :], cos[:, None, :, :])
     x1, x2 = x[..., ::2], x[..., 1::2]
     return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
 

@@ -30,7 +30,10 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, use_mesh
-from jax.experimental.shard import auto_axes as _auto_axes, reshard
+try:
+    from jax.experimental.shard import auto_axes as _auto_axes, reshard
+except ModuleNotFoundError:
+    from jax.sharding import auto_axes as _auto_axes, reshard
 from etils import epath
 
 from . import ragged_attention

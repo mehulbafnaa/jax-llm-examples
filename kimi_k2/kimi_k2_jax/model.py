@@ -1184,11 +1184,8 @@ def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config,
             weights.embedding[x, :], logical_to_sharding(("batch", "sequence", "act_embed"), cfg.mesh, cfg.rules)
         )
     positions = segment_ids_to_positions(segment_ids)
-    # Apply rotary embeddings: [B, T, head_dim]
     if cache is not None:
-        # For inference with cache, we need to index the positional embeddings
         positions = positions + cache.fill_len()[:, None]
-    # NOTE: At inference time this only works for UNPACKED sequences.
     sin, cos = generate_pos_embeddings(positions, cfg.qk_rope_head_dim, cfg) # [B, T, head_dim]
     sin, cos = sin.astype(cfg.dtype), cos.astype(cfg.dtype)
 
@@ -1197,20 +1194,15 @@ def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config,
         x, cache_updates = forward_layer(x, segment_ids, layer, sin, cos, idx, cfg, cache)
         all_cache_updates.append(cache_updates)
 
-    # Final layer norm.
-    x = rms_norm(x, weights.gamma_final)
-    # Project to vocabulary size
+    x = rms_norm(x, weights.gamma_final)  # Final layer norm.
     with jax.named_scope("vocab_out_proj"):
         x = jax.lax.with_sharding_constraint(x, logical_to_sharding(("batch", "sequence", None), cfg.mesh, cfg.rules))
-        logits = jnp.einsum("btd,dv->btv", x, weights.lm_head)
+        logits = jnp.einsum("btd,dv->btv", x, weights.lm_head)  # Project to vocabulary size
 
     if is_type(cache, KVCache):
         cache.k_nope, cache.k_pe, cache.v = [[z[i] for z in all_cache_updates] for i in range(3)]
         additional_tokens = jnp.max(_length_minus_right_padding(segment_ids))
-        new_iter = (jnp.maximum(0, cache.iter) + additional_tokens) % cache.size
-        ring_should_push_starts = (cache.iter >= 0) & (additional_tokens >= ((cache.starts - cache.iter) % cache.size))
-        new_starts = jnp.where(ring_should_push_starts, (new_iter + 1) % cache.size, cache.starts)
-        return logits, dataclasses.replace(cache, iter=new_iter, starts=new_starts)
+        return logits, dataclasses.replace(cache, iter=(jnp.maximum(0, cache.iter) + additional_tokens) % cache.size)
     else:
         return logits, all_cache_updates
 

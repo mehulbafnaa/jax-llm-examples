@@ -40,6 +40,8 @@ from etils import epath
 from . import ragged_attention
 from .decode_ragged_dot import decode_ragged_dot
 
+PAD_ID = 151643
+
 AxisName = str | tuple[str, ...] | None
 Axes = tuple[AxisName, ...]
 
@@ -227,10 +229,10 @@ class ArrayInfo:
 # module reload friendly isinstance check
 is_type = lambda x, cls: (type(x).__name__ == cls.__name__) and (type(x).__module__ == cls.__module__)
 is_param = lambda x: is_type(x, ArrayInfo)
-_count_left_padding = lambda ids, pad_id=0: auto_axes(
+_count_left_padding = lambda ids, pad_id=PAD_ID: auto_axes(
     lambda ids: jnp.sum(jnp.cumsum(ids != pad_id, axis=-1) == 0, axis=-1), out_sharding=P(None)
 )(ids)
-_length_minus_padding = lambda segment_ids: auto_axes(
+_length_minus_right_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
@@ -519,12 +521,14 @@ class Weights(_Init):
         )
 
 
-@jax_pytree_struct
+@partial(jax_pytree_struct, meta_fields=["time_axis", "size"])
 class KVCache(_Init):
     k: list[jax.Array]  # (batch_size, key_heads, max_seq_len, head_dim)
     v: list[jax.Array]  # (batch_size, key_heads, max_seq_len, head_dim)
-    length: jax.Array  # []  # sequences are right-aligned for slice udpate performance
+    iter: jax.Array  # []  # sequences are right-aligned for slice udpate performance
     starts: jax.Array  # [batch_size]  # sequences are right-aligned, we need start indices
+    time_axis: int = 2
+    size: int = -1
 
     @classmethod
     def abstract(cls, cfg: Config, batch_size: int, max_seq_len: int):
@@ -537,8 +541,9 @@ class KVCache(_Init):
         cache = KVCache(
             k=[val_info for _ in range(cfg.num_layers)],
             v=[val_info for _ in range(cfg.num_layers)],
-            length=ArrayInfo((), jnp.int32, (), jax.nn.initializers.zeros),
+            iter=ArrayInfo((), jnp.int32, (),  jax.nn.initializers.constant(-1)),
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), jax.nn.initializers.zeros),
+            size=max_seq_len,
         )
         if cfg.quant_cache:
             _quantize = partial(quantize, axis=-1, scale_dtype=cfg.quant_scale_dtype, zero_init=True)
@@ -555,9 +560,12 @@ class KVCache(_Init):
             )
         return cache
 
+    def fill_len(self) -> jax.Array:
+        return jnp.where(self.iter >= 0, (self.iter - self.starts) % self.size, 0)
+
     @property
-    def time_axis(self) -> int:
-        return 2
+    def buffers(self) -> tuple[jax.Array | QuantArray, ...]:
+        return (self.k, self.v)
 
 
 def segment_ids_to_positions(segment_ids):
@@ -624,31 +632,15 @@ def apply_rotary_embedding(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.
     return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
 
 
-def make_attention_mask(
-    q_len,
-    k_len,
-    q_segment_ids,
-    k_segment_ids,
-    q_offset,
-    causal: bool,
-    starts: jax.Array | None = None,
-):
-    # [B, t, T]
-    segment_mask = q_segment_ids[:, :, None] == k_segment_ids[:, None, :]
-    # [B, t, T] -> [B, 1, t, T]
-    segment_mask = segment_mask[:, None, :, :]
-
+def make_attention_mask(q_len, k_len, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal: bool):
+    segment_mask = (q_segment_ids[:, :, None] == kv_segment_ids[:, None, :])[:, None, :, :] # [B, 1, t, T]
     if causal:
-        # [b, h, t, T]
-        qk = (1, 1, q_len, k_len)
-        q_iota = jax.lax.broadcasted_iota(jnp.int32, qk, 2)
-        k_iota = jax.lax.broadcasted_iota(jnp.int32, qk, 3)
-        q_positions = q_iota + q_offset[:, None, None, None]
-        causal_mask = q_positions >= k_iota
-        combined_mask = jnp.logical_and(segment_mask, causal_mask)
-        return combined_mask
-    else:
-        return segment_mask
+        qk = (1, 1, q_len, k_len)  # [b, h, t, T]
+        q_positions = jax.lax.broadcasted_iota(jnp.int32, qk, 2) + q_offset[:, None, None, None]
+        kv_positions = (jax.lax.broadcasted_iota(jnp.int32, qk, 3) + kv_offset[:, None, None, None]) % k_len
+        causal_mask = q_positions >= kv_positions
+        return segment_mask & causal_mask
+    return segment_mask
 
 
 @partial(auto_axes, out_sharding=P(BATCH_AXIS_NAME, ATTN_HEADS_AXIS_NAME, None, None))
@@ -659,6 +651,7 @@ def attention(
     q_segment_ids: jax.Array,
     k_segment_ids: jax.Array,
     q_offset: jax.Array,
+    kv_offset: jax.Array,
     starts: jax.Array,
     lengths: jax.Array,
     cfg: Config,
@@ -678,6 +671,7 @@ def attention(
     Returns:
     Attention output of shape (batch_size, num_heads, q_len, head_dim)
     """
+    del starts, lengths
 
     scale = cfg.head_dim**-0.5
 
@@ -689,8 +683,7 @@ def attention(
     qk = einsum("bhgtd,bhTd->bhgtT", q_, k) * scale
     qk = qk.reshape((b, qh, t, T))
 
-    del lengths
-    mask = make_attention_mask(t, T, q_segment_ids, k_segment_ids, q_offset, cfg.causal, starts)
+    mask = make_attention_mask(t, T, q_segment_ids, k_segment_ids, q_offset, kv_offset, cfg.causal)
 
     # Apply the combined mask
     qk = jnp.where(mask, qk, -1e30)
@@ -703,7 +696,7 @@ def attention(
     return qkv.reshape((b, qh, t, d))
 
 
-def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, lengths, cfg: Config):
+def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths, cfg: Config):
     """Flash attention kernel!"""
 
     # On TPUv3, pallas seems to only work with float32.
@@ -805,28 +798,30 @@ def attention_block(
         q, k = apply_rotary_embedding(q, sin, cos), apply_rotary_embedding(k, sin, cos)
 
     with jax.named_scope("cache_update"):
-        if cache is not None:
-            k = update_slice(cache.k[idx], k, cache.length, update_axis=cache.time_axis, quant_axis=-1)
-            v = update_slice(cache.v[idx], v, cache.length, update_axis=cache.time_axis, quant_axis=-1)
-            time_indices = jnp.arange(0, v.shape[cache.time_axis])[None, :]  # [1, T]
+        if is_type(cache, KVCache):
+            it = jnp.maximum(cache.iter, 0)
+            k = update_slice(cache.k[idx], k, it, update_axis=cache.time_axis, quant_axis=-1)
+            v = update_slice(cache.v[idx], v, it, update_axis=cache.time_axis, quant_axis=-1)
+            cache_updates = (k, v)
 
+            # create position embeddings
+            additional_tokens = jnp.max(_length_minus_right_padding(segment_ids))
+            time_indices = (jnp.arange(0, v.shape[-2])[None, :] - cache.starts[:, None]) % cache.size
             q_segment_ids = jnp.where(segment_ids != 0, 1, 0)
-            incremental_position = jnp.max(_length_minus_padding(segment_ids))
-            # i.e. valid below where we've written things [B, T]
-            k_segment_ids = (
-                (time_indices >= cache.starts[:, None]) & (time_indices < (cache.length + incremental_position))
-            ).astype(jnp.int32)
-
-            q_offset = cache.length[None]
-            starts, lengths = cache.starts, (cache.length + incremental_position)[None]
+            kv_segment_ids = (time_indices >= 0) & (time_indices < cache.fill_len()[:, None] + additional_tokens)
+            q_offset = cache.fill_len() - _count_left_padding(q_segment_ids, pad_id=0)  # pad_id=0 for segment_ids
+            kv_offset = -cache.starts
+            starts, lengths = cache.starts, cache.fill_len() + additional_tokens
         else:
-            q_segment_ids, k_segment_ids = segment_ids, segment_ids
-            q_offset = jnp.zeros(x.shape[0], dtype=jnp.int32)
-            starts, lengths = _count_left_padding(k_segment_ids, 0), _length_minus_padding(k_segment_ids)
+            q_segment_ids, kv_segment_ids = segment_ids, segment_ids
+            starts = _count_left_padding(kv_segment_ids, 0)  # pad_id=0 for segment_ids
+            lengths = _length_minus_right_padding(kv_segment_ids)
+            q_offset, kv_offset = -starts, -starts
+            cache_updates = (k, v)
 
     # Compute attention
     with jax.named_scope("attention"):
-        attn_args = (q, k, v, q_segment_ids, k_segment_ids, q_offset, starts, lengths)
+        attn_args = (q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths)
         if (cfg.use_prefill_attn_kernel and q.shape[-2] != 1) or (cfg.use_decode_attn_kernel and q.shape[-2] == 1):
             attn_out = attention_kernel(*attn_args, cfg=cfg)
         else:
@@ -837,7 +832,7 @@ def attention_block(
         attn_out = einsum(
             "bhtq,hqd->btd", attn_out, layer.o, out_sharding=l2p("batch", "sequence", "act_embed")
         ).astype(cfg.dtype)
-    return attn_out, k, v
+    return attn_out, cache_updates
 
 
 @partial(jax.jit, static_argnames=("replicated_routing",))
@@ -863,7 +858,7 @@ def _moe_gmm(lhs, rhs, group_sizes, topk_idx, cfg: Config):
     assert lhs.ndim == 2 and rhs.ndim == 3, f"{lhs.ndim=} != 2 and {rhs.ndim=} != 3"
     group_sizes = group_sizes.astype(jnp.int32)
     if cfg.use_ragged_dot_kernel and lhs.shape[0] <= 1024 and which_platform(cfg) == "tpu":
-        with jax.named_scope("jax.lax.ragged_dot"):
+        with jax.named_scope("decode_ragged_dot"):
             block_g, block_n = min(8, rhs.shape[0]), min(128, lhs.shape[0])
             if is_type(rhs, QuantArray):
                 assert rhs.scale.ndim == 2 and rhs.scale.shape == (rhs.quant.shape[0], rhs.quant.shape[2])
@@ -1023,6 +1018,7 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
         ff_out_expert = _expert_fn(x_, we_gate, we_up, we_down, topk_weights, topk_idx)[..., : x.shape[-1]]
     return psc(ff_out_expert, l2p("batch", "sequence", "act_embed"))
 
+
 def mlp_block(x: jax.Array, layer: Layer, cfg: Config):
     l2p = lambda *specs: logical_to_physical(specs, cfg.rules)
     dtype = cfg.dtype
@@ -1035,6 +1031,7 @@ def mlp_block(x: jax.Array, layer: Layer, cfg: Config):
             "btf,fd->btd", ff_gate * ff_up, layer.w_down, out_sharding=l2p("batch", "sequence", "act_embed")
         ).astype(dtype)
     return ff_out
+
 
 def forward_layer(
     x: jax.Array,
@@ -1051,7 +1048,7 @@ def forward_layer(
     # Attention block
     with jax.named_scope("attn_pre_norm"):
         attn_in = rms_norm(x, layer.attn_pre_gamma, cfg.norm_eps)
-    attn_out, k, v = attention_block(attn_in, segment_ids, layer.attn, sin, cos, cfg, cache, idx)
+    attn_out, cache_updates = attention_block(attn_in, segment_ids, layer.attn, sin, cos, cfg, cache, idx)
     with jax.named_scope("residual"):
         x = x + attn_out.astype(cfg.dtype)
 
@@ -1063,46 +1060,32 @@ def forward_layer(
     with jax.named_scope("residual"):
         x = x + ff_out.astype(cfg.dtype)
 
-    return x, k, v
+    return x, cache_updates
 
 
-def forward(
-    x: jax.Array,
-    segment_ids: jax.Array,
-    weights: Weights,
-    cfg: Config,
-    cache: KVCache | None = None,
-):
+def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config, cache: KVCache | None = None):
     l2p = lambda *args: logical_to_physical(args, cfg.rules)
-    # Embed input tokens [B, T] -> [B, T D]
-    x = weights.embedding.at[x, :].get(out_sharding=l2p("batch", "sequence", "act_embed"))
-    batch = x.shape[0]
+    x = weights.embedding.at[x, :].get(out_sharding=l2p("batch", "sequence", "act_embed"))  # Embed input tokens [B, T] -> [B, T D]
+
     positions = segment_ids_to_positions(segment_ids)
-    # Apply rotary embeddings: [B, T, head_dim]
-    if cache is not None:
-        # For inference with cache, we need to index the positional embeddings
-        start_indices = jnp.where(cache.length != 0, cache.length - cache.starts, 0)
-    else:
-        start_indices = jnp.zeros((batch,), dtype=jnp.int32)
-    # NOTE: At inference time this only works for UNPACKED sequences.
-    positions = start_indices[:, None] + positions
-    # [B, T, head_dim]
-    sin, cos = _generate_pos_embeddings(positions, cfg.head_dim, cfg)
+    if is_type(cache, KVCache):
+        positions = positions + cache.fill_len()[:, None]
+    sin, cos = _generate_pos_embeddings(positions, cfg.head_dim, cfg)  # [B, T, head_dim]
     sin, cos = sin.astype(cfg.dtype), cos.astype(cfg.dtype)
 
+    all_cache_updates = []
     for idx, layer in enumerate(weights.layers):
-        x, k, v = forward_layer(x, segment_ids, layer, sin, cos, idx, cfg, cache)
-        cache.k[idx], cache.v[idx] = k, v
+        x, cache_updates = forward_layer(x, segment_ids, layer, sin, cos, idx, cfg, cache)
+        all_cache_updates.append(cache_updates)
 
-    # Final layer norm.
-    x = rms_norm(x, weights.gamma_final, cfg.norm_eps)
-    # Project to vocabulary size
-    logits = einsum("btd,dv->btv", x, weights.lm_head)
-    if cache is not None:
-        # Sum where there is a valid segment id (i.e. non padding tokens) [B, T] -> [B,]
-        cache = dataclasses.replace(cache, length=cache.length + jnp.max(_length_minus_padding(segment_ids)))
-        return logits, cache
-    return logits
+    x = rms_norm(x, weights.gamma_final, cfg.norm_eps)  # Final layer norm.
+    logits = einsum("btd,dv->btv", x, weights.lm_head)  # Project to vocabulary size
+    if is_type(cache, KVCache):
+        cache.k, cache.v = [[z[i] for z in all_cache_updates] for i in range(2)]
+        additional_tokens = jnp.max(_length_minus_right_padding(segment_ids))
+        return logits, dataclasses.replace(cache, iter=(jnp.maximum(0, cache.iter) + additional_tokens) % cache.size)
+    else:
+        return logits, all_cache_updates
 
 
 # serialization
@@ -1130,33 +1113,33 @@ def prepare_chunk(chunk, pad_to: int, pad_id: int):
     # [bs, length] -> [bs, padded]
     if chunk.ndim == 1:
         chunk = chunk[None, :]
-    chunk = jnp.pad(chunk, [(0, 0), (0, pad_to - chunk.shape[-1])])
+    chunk = jnp.pad(chunk, [(0, 0), (0, pad_to - chunk.shape[-1])], mode="constant", constant_values=pad_id)
     segment_ids = jnp.where(chunk != pad_id, 1, 0).astype(jnp.int32)
     return chunk, segment_ids
 
 
 def prefill(
-    tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = 0
+    tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = PAD_ID
 ) -> tuple[jax.Array, jax.Array, KVCache]:
     """Samples from a prompt."""
     # Calculate the next power of 2 for padding, up to cfg.max_seq.
     assert tokens.shape[-1] <= cfg.max_seq_len
-    with use_mesh(cfg.mesh):
-        pad_to = 2 ** math.ceil(math.log2((tokens.shape[-1])))
-        prompt, prompt_segment_ids = prepare_chunk(tokens, pad_to=pad_to, pad_id=pad_id)
-        assert prompt.ndim == 2
+    pad_to = 2 ** math.ceil(math.log2((tokens.shape[-1])))
+    prompt, prompt_segment_ids = prepare_chunk(tokens, pad_to=pad_to, pad_id=pad_id)
+    assert prompt.ndim == 2
 
-        cache_shardings = KVCache.shardings(cfg, cache.k[0].shape[0], cache.k[0].shape[cache.time_axis])
-        logits_shardings = jax.sharding.NamedSharding(cfg.mesh, P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME))
-
-        cache = dataclasses.replace(
-            cache, length=jnp.zeros_like(cache.length), starts=_count_left_padding(tokens, pad_id=pad_id)
-        )
-        logits, cache = jax.jit(forward, donate_argnums=(4,), out_shardings=(logits_shardings, cache_shardings))(
-            prompt, prompt_segment_ids, weights, cfg, cache
-        )
-        next_tokens = jax.jit(partial(jnp.argmax, axis=-1))(logits)
-        return next_tokens, logits, cache
+    cache_shardings = KVCache.shardings(cfg, prompt.shape[0], cfg.max_seq_len)
+    if is_type(cache, KVCache):
+        uninitialized_iter = -jnp.ones_like(cache.iter)
+        cache = dataclasses.replace(cache, starts=_count_left_padding(prompt, pad_id=pad_id), iter=uninitialized_iter)
+    else:
+        cache_shardings = tuple([z[idx] for idx in range(cfg.num_layers)] for z in cache_shardings)
+    logits_shardings = jax.sharding.NamedSharding(cfg.mesh, P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME))
+    logits, cache = jax.jit(forward, donate_argnums=(4,), out_shardings=(logits_shardings, cache_shardings))(
+        prompt, prompt_segment_ids, weights, cfg, cache
+    )
+    next_tokens = jax.jit(partial(jnp.argmax, axis=-1))(logits)
+    return next_tokens, logits, cache
 
 
 @partial(jax.jit, donate_argnames=("cache",))

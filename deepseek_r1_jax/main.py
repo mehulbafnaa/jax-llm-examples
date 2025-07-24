@@ -25,7 +25,7 @@ from deepseek_r1_jax import model as dsjax
 from deepseek_r1_jax import chkpt_utils as utils
 
 
-def encode_input(tokenizer, texts, pad_id: int = 0):
+def encode_input(tokenizer, texts, pad_id: int = dsjax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
         tokenizer.apply_chat_template([{"role": "user", "content": text}]) + tokenizer.encode("<|Assistant|><think>")

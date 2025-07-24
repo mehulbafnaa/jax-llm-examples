@@ -25,7 +25,7 @@ import numpy as np
 from qwen3_jax import model as q3jax
 
 
-def encode_input(tokenizer, texts, pad_id: int = 0):
+def encode_input(tokenizer, texts, pad_id: int = q3jax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
         tokenizer.apply_chat_template([{"role": "user", "content": text}], add_generation_prompt=True)
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     with use_mesh(cfg.mesh):
         zero_cache = q3jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
         next_tokens, logits, cache = q3jax.prefill(input, weights, zero_cache, cfg)
-        curr_tokens = next_tokens.at[:, cache.length - 1 : cache.length].get(out_sharding=P(None, None))
+        curr_tokens = next_tokens.at[:, cache.iter - 1 : cache.iter].get(out_sharding=P(None, None))
         tokens_list = []
         for _ in range(32):
             tokens_list.append(curr_tokens)

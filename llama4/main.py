@@ -26,7 +26,7 @@ import numpy as np
 from llama4_jax import model as l4jax
 
 
-def encode_input(tokenizer, texts, pad_id: int = 0):
+def encode_input(tokenizer, texts, pad_id: int = l4jax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
         tokenizer.apply_chat_template([{"role": "user", "content": text}])

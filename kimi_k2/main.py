@@ -25,7 +25,7 @@ from kimi_k2_jax import model as k2jax
 from kimi_k2_jax import chkpt_utils as utils
 
 
-def encode_input(tokenizer, texts, pad_id: int = 0):
+def encode_input(tokenizer, texts, pad_id: int = k2jax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
         tokenizer.apply_chat_template([{"role": "user", "content": text}], add_generation_prompt=True)

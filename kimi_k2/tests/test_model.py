@@ -38,6 +38,7 @@ SMALL_CFG = k2jax.Config(
     qk_nope_head_dim=56,
     qk_rope_head_dim=48,
     v_head_dim=16,
+    use_decode_ragged_dot_kernel=False,
 )
 
 

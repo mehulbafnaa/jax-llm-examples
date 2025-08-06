@@ -18,7 +18,12 @@ from absl.testing import absltest, parameterized
 import jax
 from jax import numpy as jnp
 from jax import random
-from jax.sharding import PartitionSpec as P, AxisType, use_mesh
+from jax.sharding import PartitionSpec as P, AxisType, set_mesh
+try:
+    from jax.sharding import use_mesh
+    set_mesh = use_mesh
+except ImportError:
+    pass
 
 from llama4_jax import model as l4jax
 
@@ -101,10 +106,10 @@ class TestModel(parameterized.TestCase):
         tokens = jnp.ones((1, 32), dtype=jnp.int32)
         weights = l4jax.Weights.init(random.key(0), cfg)
         cache = l4jax.KVCache.init(random.key(0), cfg, tokens.shape[0], cfg.max_seq_len)
-        with use_mesh(cfg.mesh):
+        with set_mesh(cfg.mesh):
             max_tokens, _, cache = l4jax.prefill(tokens, weights, cache, cfg)
         next_tokens = max_tokens[:, :-1]
-        with use_mesh(cfg.mesh):
+        with set_mesh(cfg.mesh):
             for _ in range(2):
                 next_tokens, cache = l4jax.decode_step(next_tokens, weights, cache, cfg)
 

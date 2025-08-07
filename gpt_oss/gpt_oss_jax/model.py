@@ -19,7 +19,7 @@ import os
 import json
 from pathlib import Path
 import math
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable, Any
 from inspect import signature
 from collections import OrderedDict as odict
@@ -54,7 +54,6 @@ Axes = tuple[AxisName, ...]
 BATCH_AXIS_NAME = "x"
 EXPERT_AXIS_NAME = "z"
 TENSOR_ONLY_AXIS_NAME = "y"
-# ATTN_HEADS_AXIS_NAME = "y"
 ATTN_HEADS_AXIS_NAME = "z"
 TENSOR_AXIS_NAME = ("y", "z")
 
@@ -157,7 +156,7 @@ class Config:
     # kernel config
     use_prefill_attn_kernel: bool = False
     use_decode_attn_kernel: bool = False
-    use_ragged_dot_kernel: bool = True
+    use_ragged_dot_kernel: bool = False
     dtype: "jnp.dtype" = jnp.bfloat16
     norm_eps: float = 1e-5
     # sharding
@@ -241,6 +240,8 @@ _length_minus_right_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
+# he_normal generates a new lambda every time it's called which defeats caching for `Layer.init`, so cache the lambda
+_he_normal = lru_cache(lambda *args, **kw: jax.nn.initializers.he_normal(*args, **kw))
 
 
 @partial(jax.jit, static_argnames=("abstract", "shardings"))
@@ -368,26 +369,25 @@ class AttentionLayer(_Init):
     o_bias: jax.Array | ArrayInfo | QuantArray
     sinks: jax.Array | ArrayInfo | QuantArray
 
-    ########################################################################################################################
     @classmethod
     def abstract(cls, cfg: Config) -> "AttentionLayer":
-        _init = lambda *out_axes: jax.nn.initializers.he_normal(in_axis=0, out_axis=out_axes)
+        _init = _he_normal(in_axis=0, out_axis=(1, 2))
         _zero_init = jax.nn.initializers.zeros
         layer = AttentionLayer(
             q=ArrayInfo(
-                (cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init
             ),
             q_bias=ArrayInfo((cfg.q_heads, cfg.head_dim), cfg.dtype, ("q_heads", "head_dim"), _zero_init),
             k=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init
             ),
             k_bias=ArrayInfo((cfg.kv_heads, cfg.head_dim), cfg.dtype, ("kv_heads", "head_dim"), _zero_init),
             v=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init
             ),
             v_bias=ArrayInfo((cfg.kv_heads, cfg.head_dim), cfg.dtype, ("kv_heads", "head_dim"), _zero_init),
             o=ArrayInfo(
-                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init(1, 2)
+                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init
             ),
             o_bias=ArrayInfo((cfg.embed,), cfg.dtype, ("o_embed",), _zero_init),
             sinks=ArrayInfo((cfg.head_dim,), cfg.dtype, (None,), _zero_init),
@@ -422,8 +422,7 @@ class MoELayer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config):
-        _einit = jax.nn.initializers.he_normal(in_axis=0, out_axis=(1, 2))
-        _sinit = jax.nn.initializers.he_normal(in_axis=0, out_axis=1)
+        _einit, _sinit = _he_normal(in_axis=0, out_axis=(1, 2)), _he_normal(in_axis=0, out_axis=1)
         _zero_init = jax.nn.initializers.zeros
         dtype = cfg.dtype
         layer = MoELayer(
@@ -499,12 +498,12 @@ class Weights(_Init):
     @classmethod
     def abstract(cls, cfg: Config):
         layers = [Layer.abstract(cfg, layer_idx) for layer_idx in range(cfg.num_layers)]
-        init = lambda in_axis, out_axis: jax.nn.initializers.he_normal(in_axis=in_axis, out_axis=out_axis)
+        init01, init10 = _he_normal(in_axis=0, out_axis=1), _he_normal(in_axis=1, out_axis=0)
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init(0, 1)),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01),
             gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
-            lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init(1, 0)),
+            lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init10),
         )
 
 
@@ -565,12 +564,7 @@ def segment_ids_to_positions(segment_ids):
     return jnp.array(jax.lax.associative_scan(scan_fun, vals, axis=-1)[0], dtype="int32")
 
 
-def _generate_pos_embeddings(
-    # positions: jax.Array, features: int, min_timescale=1.0, max_timescale=16384.0
-    positions: jax.Array,
-    features: int,
-    cfg: Config,
-) -> tuple[jax.Array, jax.Array]:
+def _generate_pos_embeddings(positions: jax.Array, features: int, cfg: Config) -> tuple[jax.Array, jax.Array]:
     """Yarn rope"""
     base, factor = cfg.rope_theta, cfg.rope_factor
     original_max_pos = cfg.rope_original_max_position_embeddings
@@ -608,9 +602,10 @@ def apply_rotary_embedding(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.
 
 
 def make_attention_mask(
-    q_len, k_len, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal: bool, sliding_window: int | None = None
+    q_len, k_len, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal: bool, sliding_window: int | None = None, debug: bool = False
 ):
     segment_mask = (q_segment_ids[:, :, None] == kv_segment_ids[:, None, :])[:, None, :, :]  # [B, 1, t, T]
+    segment_mask &= (q_segment_ids != 0)[:, None, :, None] & (kv_segment_ids != 0)[:, None, None, :]
     if causal:
         qk = (1, 1, q_len, k_len)  # [b, h, t, T]
         q_positions = jax.lax.broadcasted_iota(jnp.int32, qk, 2) + q_offset[:, None, None, None]
@@ -629,7 +624,7 @@ def attention(
     v: jax.Array | tuple[jax.Array, jax.Array],
     sinks: jax.Array,
     q_segment_ids: jax.Array,
-    k_segment_ids: jax.Array,
+    kv_segment_ids: jax.Array,
     q_offset: jax.Array,
     kv_offset: jax.Array,
     starts: jax.Array,
@@ -665,7 +660,7 @@ def attention(
     qk = einsum("bhgtd,bhTd->bhgtT", q_, k) * scale
     qk = qk.reshape((b, qh, t, T))
 
-    mask = make_attention_mask(t, T, q_segment_ids, k_segment_ids, q_offset, kv_offset, cfg.causal, sliding_window)
+    mask = make_attention_mask(t, T, q_segment_ids, kv_segment_ids, q_offset, kv_offset, cfg.causal, sliding_window)
 
     # Apply the combined mask
     qk = jnp.where(mask, qk, -1e30).astype(jnp.float32)
@@ -823,14 +818,14 @@ def attention_block(
 
 
 @partial(jax.jit, static_argnames=("replicated_routing",))
-def _route_tokens_to_moe_experts(x: jax.Array, weight: jax.Array, replicated_routing: bool, cfg: Config):
+def _route_tokens_to_experts(x: jax.Array, weight: jax.Array, bias: jax.Array, replicated_routing: bool, cfg: Config):
     lsc = lambda x, spec: reshard(x, logical_to_physical(spec, cfg.rules))
     x_shape = x.shape
     x = x.reshape((-1, x.shape[-1]))
     # not distributing the routing work avoids communication for small batches
     x = lsc(x, (None, None)) if replicated_routing else reshard(x, P(TENSOR_AXIS_NAME, None))
-    weight = lsc(weight, (None, None))
-    scores = jnp.einsum("Sk,kj->Sj", x, weight).astype(cfg.moe_gate_dtype)
+    weight, bias = lsc(weight, (None, None)), lsc(bias, (None,))
+    scores = (jnp.einsum("Sk,kj->Sj", x, weight) + bias).astype(jnp.float32)
     topk_weights, topk_idx = jax.lax.top_k(scores, cfg.moe_experts_per_tok)
     topk_weights = jax.nn.softmax(topk_weights, axis=-1)
     topk_weights = lsc(topk_weights, (None, None)).reshape(x_shape[:-1] + (cfg.moe_experts_per_tok,))
@@ -870,9 +865,8 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
     psc = lambda z, spec: _qpsc(z, spec) if is_type(z, QuantArray) else _psc(z, spec)
 
     # we're decoding or device count does not divide total token count
-    # replicated_routing = x.shape[-2] == 1 or (x.shape[-2] * x.shape[-3]) % jax.device_count() != 0
-    replicated_routing = True
-    topk_weights, topk_idx = _route_tokens_to_moe_experts(x, layer.w_router, replicated_routing, cfg)
+    replicated_routing = x.shape[-2] == 1 or (x.shape[-2] * x.shape[-3]) % jax.device_count() != 0
+    topk_weights, topk_idx = _route_tokens_to_experts(x, layer.w_router, layer.w_router_bias, replicated_routing, cfg)
     tensor_axname, expert_axname = l2p("moe_e_tp")[0], l2p("moe_e_ep")[0]
 
     x_spec = l2p("batch", "sequence", None)
@@ -892,15 +886,7 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
     we_down_bias = psc(layer.we_down_bias, we_down_bias_spec)
 
     in_specs = (
-        x_spec,
-        we_gate_up_spec,
-        we_gate_up_bias_spec,
-        # we_gate_up_spec,
-        # we_gate_up_bias_spec,
-        we_down_spec,
-        we_down_bias_spec,
-        topk_weights_spec,
-        topk_idx_spec,
+        x_spec, we_gate_up_spec, we_gate_up_bias_spec, we_down_spec, we_down_bias_spec, topk_weights_spec, topk_idx_spec
     )
 
     is_embedding_sharded = l2p("act_embed")[0] is not None
@@ -919,7 +905,6 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
         (b, s, d), e = x.shape, cfg.moe_experts_per_tok
         expert_idx = jax.lax.axis_index(expert_axname) if expert_axname is not None else 0
         tensor_idx = jax.lax.axis_index(tensor_axname) if tensor_axname is not None else 0
-        del tensor_idx
         topk_idx_ = topk_idx.reshape(-1)
         valid_group_mask_ = (topk_idx_ >= expert_size * expert_idx) & (topk_idx_ < expert_size * (expert_idx + 1))
         expert_mapped_topk_idx_ = jnp.where(valid_group_mask_, topk_idx_ - expert_idx * expert_size, 2**30)
@@ -941,11 +926,8 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
         # x_repeat_ = jnp.repeat(x.reshape((-1, x.shape[-1])), e, axis=0)
         # x_repeat_sort_ = jnp.take_along_axis(x_repeat_, sort_idx_[:, None], axis=-2)  # [b * s, d]
         # ```
-        x_repeat_sort_ = jnp.take_along_axis(
-            x.reshape((-1, x.shape[-1])),
-            sort_idx_[:, None] // e,
-            axis=-2,  # index trick to avoid jnp.repeat
-        )  # [b * s * e, d]
+        x_repeat_sort_ = jnp.take_along_axis(x.reshape((-1, x.shape[-1])), sort_idx_[:, None] // e, axis=-2)
+        # [b * s * e, d] # "// e" is an index trick to avoid jnp.repeat
 
         group_sizes = jnp.bincount(topk_idx_sort_, length=cfg.moe_num_experts)
         group_sizes_shard = jax.lax.dynamic_slice_in_dim(group_sizes, expert_idx * expert_size, expert_size, 0)
@@ -959,7 +941,7 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
             ff_gate_up = jnp.where(valid_group_mask_sort_[..., None], ff_gate_up, 0)
         with jax.named_scope("we_down"):
             ff_out = _moe_gmm(ff_gate_up, we_down, group_sizes_shard, expert_mapped_topk_idx_sort_, cfg)
-            ff_out = ff_out + we_down_bias[expert_mapped_topk_idx_sort_, :]
+            ff_out = ff_out + (tensor_idx == 0) * we_down_bias[expert_mapped_topk_idx_sort_, :]
             ff_out = jnp.where(valid_group_mask_sort_[..., None], ff_out, 0)  # expensive
 
         if cfg.ep_strategy == "prefill":
@@ -1123,12 +1105,23 @@ def prefill(
     next_tokens = jax.jit(partial(jnp.argmax, axis=-1))(logits)
     return next_tokens, logits, cache
 
+def sample_top(key: jax.Array, logits: jax.Array, k: int = 16, temp: float = 1.0):
+    def sample_multinomial(logits):
+        probs = jax.nn.softmax(logits / temp, axis=-1)
+        top_probs, top_tokens = jax.lax.top_k(probs, k=k)
+        idx = jnp.argmax(random.multinomial(key, 1, top_probs), -1)
+        return jnp.take_along_axis(top_tokens, idx[..., None], -1)[..., 0]
+    return jax.lax.cond(temp > 1e-3, sample_multinomial, partial(jnp.argmax, axis=-1), logits)
+
 
 @partial(jax.jit, donate_argnames=("cache",))
-def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = PAD_ID):
+def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = PAD_ID, key = None):
     assert last_tokens.ndim == 2
     segment_ids = (last_tokens != pad_id).astype(jnp.int32)
     next_logits, cache = forward(last_tokens, segment_ids, weights, cfg, cache)
-    next_tokens = jnp.argmax(next_logits, -1)
-    next_tokens = reshard(next_tokens, P())
-    return next_tokens, cache
+    #next_tokens = jnp.argmax(next_logits, -1)
+    key = key if key is not None else random.key(cache.iter)  # poor man's random key
+    next_tokens = auto_axes(sample_top, out_sharding=P(*jax.typeof(next_logits).sharding.spec[:-1]))(
+        key, next_logits, temp=0.7
+    )
+    return reshard(next_tokens, P()), cache

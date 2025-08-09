@@ -45,7 +45,7 @@ def decode_ragged_dot_kernel(
     n: int,
     g: int,
 ):
-    pid_g, pid_i = pl.program_id(0), pl.program_id(1)
+    pid_g, pid_i = pl.program_id(1), pl.program_id(2)
     (_, k), _, m = x_ref.shape, A_ref.shape[0], A_ref.shape[-1]
     block_n_id = lhs_idx_map_ref[pid_g, pid_i]
 
@@ -86,9 +86,8 @@ def decode_ragged_dot_kernel(
             def _compute():
                 # compute the actual product with the group_id group
                 A = A_ref[local_group_id, :, :]
-                xA = jax.lax.dot_general(x, A, (((1,), (0,)), ((), ())), preferred_element_type=jnp.float32).astype(
-                    y.dtype
-                )
+                xA = jax.lax.dot_general(x, A, (((1,), (0,)), ((), ())), preferred_element_type=jnp.float32)
+                xA = xA.astype(y.dtype)
                 # write to y accumulator masking already computed values
                 iota = jax.lax.broadcasted_iota(jnp.int32, (block_compute, m), dimension=0) + i * block_compute
                 mask = (iota >= lhs_idx) & (iota < (lhs_idx + els2compute))
@@ -97,7 +96,7 @@ def decode_ragged_dot_kernel(
             new_y = jax.lax.cond(els2compute > 0, _compute, lambda: y)
 
             new_group_id = jnp.where(group_exhausted, group_id + 1, group_id)
-            next_group_size = group_sizes_ref[pid_g * block_g + jnp.clip(local_group_id + 1, max=g - 1)]
+            next_group_size = group_sizes_ref[jnp.clip(pid_g * block_g + local_group_id + 1, max=g - 1)]
             new_group_size = jnp.where(group_exhausted, next_group_size, group_size - els2compute)
             new_lhs_idx = lhs_idx + els2compute
 
@@ -120,13 +119,14 @@ def decode_ragged_dot_kernel(
 ################################################################################
 
 
-@partial(jax.jit, static_argnames=("block_n", "block_g", "block_compute", "interpret"))
+@partial(jax.jit, static_argnames=("block_n", "block_g", "block_compute", "block_out", "interpret"))
 def decode_ragged_dot(
     lhs: jax.Array,  # [n, k]
     rhs: jax.Array,  # [g, k, m]
     group_sizes: jax.Array,  # g[]
     block_n: int = int(1e20),  # by default replicate activations fully
     block_g: int = 8,
+    block_out: int = int(1e20),  # by default write full output columns at the same time
     block_compute: int = 8,
     interpret: bool = False,
 ) -> jax.Array:
@@ -153,14 +153,14 @@ def decode_ragged_dot(
 
     block_n = min(block_n, lhs.shape[0])
     block_compute = min(block_compute, block_n)
+    block_out = max(128, min(block_out, rhs.shape[-1]))
     assert rhs.ndim == 3 and lhs.ndim == 2, "lhs must have 2 dims, rhs 3 dims"
     assert rhs.shape[0] % block_g == 0, f"{block_g=} must divide {rhs.shape[0]=} (# of groups) must divide"
-    assert lhs.shape[0] % block_n == 0, f"{block_n=} must divide {lhs.shape[0]=}"
     assert block_n % block_compute == 0, f"{block_n = } {block_compute = } {lhs.shape = }"
     assert rhs.shape[:1] == group_sizes.shape
     (n, k), (g, _, m) = lhs.shape, rhs.shape
 
-    grid = (g // block_g, n // block_n)
+    grid = (pl.cdiv(rhs.shape[-1], block_out), g // block_g, n // block_n)
 
     # compute lhs prefetch map, only increment lhs idx if work is exhausted to avoid revisiting rows in lhs/output
     # [[ 0 0 1 1 ]
@@ -169,37 +169,38 @@ def decode_ragged_dot(
     #  [ 3 4 4 4 ]]
     work_total = jnp.pad(jnp.cumsum(jnp.sum(group_sizes.reshape((-1, block_g)), -1), axis=-1), (1, 0))
     min_lhs_j = work_total[:-1] // block_n
-    lhs_idx_map = min_lhs_j[:, None] + jnp.arange(grid[1])[None, :]
-    lhs_idx_map = jnp.clip(lhs_idx_map, max=jnp.pad(min_lhs_j[1:], (0, 1), constant_values=grid[1] - 1)[:, None])
+    lhs_idx_map = min_lhs_j[:, None] + jnp.arange(grid[-1])[None, :]
+    max_lhs_j = jnp.concatenate([min_lhs_j[1:], jnp.array([grid[-1] - 1])])
+    lhs_idx_map = jnp.clip(lhs_idx_map, max=jnp.minimum(max_lhs_j[:, None], grid[-1] - 1))
 
     # compute rhs prefetch map
     # [ 1 1 1 3 4 5 5 5] if 8 groups, but only {1, 3, 4, 5} active
-    def _compute_rhs_idx(i_prev, mask):
-        i, prev = i_prev
-        idx = jnp.where(mask, i, prev)
-        return (i - 1, idx), idx
-
     rhs_work_mask = jnp.sum(group_sizes.reshape((-1, block_g)), -1) > 0
     unique_rhs_groups = jnp.sort(jnp.arange(rhs_work_mask.shape[-1]) * rhs_work_mask, descending=True)
     flipped_rhs_groups_mapping = jnp.maximum(jnp.cumsum(jnp.flip(rhs_work_mask, axis=-1)) - 1, 0)
     rhs_idx_map = jnp.flip(unique_rhs_groups[flipped_rhs_groups_mapping], axis=-1)
 
-    def lhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
+    def lhs_prefetch(out_i, i, j, lhs_idx_map_ref, rhs_idx_map_ref):
         # as opposed to: `return j, 0`
         del rhs_idx_map_ref
         return lhs_idx_map_ref[i, j], 0
 
-    def rhs_prefetch(i, j, lhs_idx_map_ref, rhs_idx_map_ref):
+    def rhs_prefetch(out_i, i, j, lhs_idx_map_ref, rhs_idx_map_ref):
         # as opposed to: `return i, 0, 0`
         del j, lhs_idx_map_ref
-        return rhs_idx_map_ref[i], 0, 0
+        return rhs_idx_map_ref[i], 0, out_i
+
+    def out_prefetch(out_i, i, j, lhs_idx_map_ref, rhs_idx_map_ref):
+        # as opposed to: `return j, out_i`
+        del rhs_idx_map_ref
+        return lhs_idx_map_ref[i, j], out_i
 
     in_specs = [
         pl.BlockSpec((block_n, k), lhs_prefetch),
-        pl.BlockSpec((block_g, *rhs.shape[-2:]), rhs_prefetch),
+        pl.BlockSpec((block_g, rhs.shape[-2], block_out), rhs_prefetch),
         pl.BlockSpec((group_sizes.size,), lambda i, j, *_: (0,), memory_space=pltpu.SMEM),
     ]
-    out_specs = pl.BlockSpec((block_n, m), lhs_prefetch)
+    out_specs = pl.BlockSpec((block_n, block_out), out_prefetch)
 
     scratch_shapes = [
         pltpu.SMEM((1,), dtype=jnp.int32),
@@ -214,14 +215,14 @@ def decode_ragged_dot(
         out_specs=out_specs,
         scratch_shapes=scratch_shapes,
     )
-
     out_shape = jax.ShapeDtypeStruct((n, m), dtype=lhs.dtype)
     return pl.pallas_call(
         partial(decode_ragged_dot_kernel, block_n=block_n, block_g=block_g, block_compute=block_compute, n=n, g=g),
         out_shape=out_shape,
         grid_spec=grid_spec,
         interpret=interpret,
-        compiler_params=pltpu.TPUCompilerParams(vmem_limit_bytes=1024 * 1024 * 50),
+        # do not use, causes segfaults
+        # compiler_params=pltpu.CompilerParams(vmem_limit_bytes=1024 * 1024 * 80),
     )(lhs_idx_map, rhs_idx_map, lhs, rhs, group_sizes.astype(jnp.int32))
 
 
@@ -235,6 +236,47 @@ def decode_ragged_dot_ref(
     block_compute: int = 8,
 ) -> jax.Array:
     return jax.lax.ragged_dot(lhs, rhs, group_sizes)
+
+
+def test_tune():
+    import tune_jax
+
+    tune_jax.tuning.CONFIG.allow_fallback_timing = False
+    seed = 25
+    g, n, k, m = 32, 16, 2880, 1440
+
+    keys = iter(random.split(random.key(seed), 1024))
+    x = random.normal(next(keys), (n, k), dtype=jnp.bfloat16)
+    A = random.normal(next(keys), (g, k, m), dtype=jnp.bfloat16)
+    A = A / jnp.linalg.norm(A, axis=-1)[..., None]
+    A = jnp.round(A * 127).astype(jnp.int8)
+    from jax.experimental.layout import Format, Layout
+
+    A = jax.device_put(A, Format(Layout((0, 1, 2), tiling=((8, 128), (4, 1))), A.sharding))
+
+    group_sizes = jnp.exp(1e-1 * random.uniform(next(keys), g))
+    group_sizes = jnp.round(n * (group_sizes / jnp.sum(group_sizes))).astype(jnp.int32)
+    while jnp.sum(group_sizes) > n:
+        idx = jnp.argmax(group_sizes)
+        group_sizes = group_sizes.at[idx].set(group_sizes[idx] - 1)
+    while jnp.sum(group_sizes) < n:
+        idx = jnp.argmax(group_sizes)
+        group_sizes = group_sizes.at[idx].set(group_sizes[idx] + 1)
+
+    print(jnp.sum(group_sizes))
+    print(group_sizes)
+    assert jnp.sum(group_sizes) <= n
+
+    hyperparams = dict(
+        block_n=[8, 16],
+        block_compute=[4, 8, 16, 32],
+        block_g=[1, 2, 4, 8],
+        block_out=[128, 256, 512, 1024, 2048, 4096],
+    )
+
+    fn = tune_jax.tune(decode_ragged_dot, hyperparams=hyperparams)
+    fn(x, A, group_sizes)
+    print(tune_jax.tabulate(fn))
 
 
 def test_profile_speed(interpret):
@@ -263,15 +305,9 @@ def test_profile_speed(interpret):
     print(jnp.sum(group_sizes))
     assert jnp.sum(group_sizes) <= n
 
-    opts = dict(block_n=block_n, block_g=block_g, block_compute=block_compute)
+    opts = dict(block_n=block_n, block_g=block_g, block_compute=block_compute, interpret=interpret)
     for _ in range(1):
-        ret = decode_ragged_dot(
-            x,
-            A,
-            group_sizes,
-            **opts,
-            interpret=interpret,
-        ).block_until_ready()
+        ret = decode_ragged_dot(x, A, group_sizes, **opts).block_until_ready()
         ret_ref = decode_ragged_dot_ref(x, A, group_sizes).block_until_ready()
         print(f"error = {float(jnp.linalg.norm(ret - ret_ref) / (jnp.linalg.norm(ret_ref) + 1e-5)):.4e}")
     rowwise_error = jnp.linalg.norm((ret - ret_ref).astype(jnp.float32), axis=-1) / (
@@ -299,11 +335,14 @@ def _numeric_test_case(seed, interpret, n, k, g, m, block_g, block_n, block_comp
     keys = iter(random.split(random.key(seed), 1024))
     x = random.normal(next(keys), (n, k), dtype=jnp.bfloat16)
     A = random.normal(next(keys), (g, k, m), dtype=jnp.bfloat16)
-    A = A / jnp.linalg.norm(A, axis=-1)[..., None]
-    A = jnp.round(A * 127).astype(jnp.int8)
+    # A = A / jnp.linalg.norm(A, axis=-1)[..., None]
+    # A = jnp.round(A * 127).astype(jnp.int8)
 
-    group_sizes = jnp.exp(1e1 * random.uniform(next(keys), g))
+    group_sizes = jnp.exp(1e-2 * random.uniform(next(keys), g))
     group_sizes = jnp.round(n * (group_sizes / jnp.sum(group_sizes))).astype(jnp.int32)
+    while jnp.sum(group_sizes) > n:
+        idx = jnp.argmax(group_sizes)
+        group_sizes = group_sizes.at[idx].set(group_sizes[idx] - 1)
     assert jnp.sum(group_sizes) <= n
 
     opts = dict(block_n=block_n, block_g=block_g, block_compute=block_compute)
@@ -344,4 +383,5 @@ def test_numerics():
 
 
 if __name__ == "__main__":
-    test_numerics()
+    # test_numerics()
+    test_tune()

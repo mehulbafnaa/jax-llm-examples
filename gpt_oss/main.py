@@ -23,6 +23,7 @@ from jax.sharding import set_mesh, AxisType, PartitionSpec as P
 
 try:
     from jax.sharding import use_mesh
+
     set_mesh = use_mesh
 except ImportError:
     pass
@@ -35,7 +36,8 @@ from gpt_oss_jax import model as gpt_jax
 def encode_input(tokenizer, texts, pad_id: int = gpt_jax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
-        tokenizer.apply_chat_template([{"role": "user", "content": text}], add_bos=True, add_generation_prompt=True) for text in texts
+        tokenizer.apply_chat_template([{"role": "user", "content": text}], add_bos=True, add_generation_prompt=True)
+        for text in texts
     ]
     max_len = max([len(x) for x in inputs])
     inputs = [(max_len - len(x)) * [pad_id] + x for x in inputs]
@@ -51,7 +53,7 @@ if __name__ == "__main__":
         ckpt_path = ckpt_path.parent / f"{ckpt_path.name}-quant"
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
 
-    tp = 1
+    tp = 4
     mesh = jax.make_mesh(
         (1, tp, jax.device_count() // tp), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
     )
@@ -64,24 +66,22 @@ if __name__ == "__main__":
             "Tell me your name",
             "What is the weather like expressed in long prose in Old English",
             "Do you like ice cream, be extremely precise",
-        ] + [
-            "Do you like ice cream, be extremely precise"
-        ] * (4 - 3)
+        ]
+        + ["Do you like ice cream, be extremely precise"] * (4 - 3),
     )
-
     weights = gpt_jax.load_pytree(ckpt_path, gpt_jax.Weights.shardings(cfg))
 
-    profile = False
+    profile = True
     with set_mesh(cfg.mesh):
         zero_cache = gpt_jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
-        next_tokens, logits, cache = gpt_jax.prefill(input, weights, zero_cache, cfg)
+        next_tokens, logits, cache = gpt_jax.prefill(input, weights, zero_cache, dataclasses.replace(cfg, use_ragged_dot_kernel=True))
         curr_tokens = next_tokens.at[:, cache.iter - 1 : cache.iter].get(out_sharding=P(None, None))
         tokens_list = []
         for i in range(1024):
             if profile and i == 2:
                 jax.profiler.start_trace("/tmp/gpt_profile")
             tokens_list.append(curr_tokens)
-            curr_tokens, cache = gpt_jax.decode_step(curr_tokens, weights, cache, cfg)
+            curr_tokens, cache = gpt_jax.decode_step(curr_tokens, weights, cache, dataclasses.replace(cfg, use_ragged_dot_kernel=True))
             if profile and i == 6:
                 jax.block_until_ready(tokens_list)
                 jax.profiler.stop_trace()

@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 from jax import random
 from jax import tree_util
+from jax.experimental.layout import Format, Layout
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 
@@ -156,7 +157,7 @@ class Config:
     # kernel config
     use_prefill_attn_kernel: bool = False
     use_decode_attn_kernel: bool = False
-    use_ragged_dot_kernel: bool = False
+    use_ragged_dot_kernel: bool = True
     dtype: "jnp.dtype" = jnp.bfloat16
     norm_eps: float = 1e-5
     # sharding
@@ -228,6 +229,7 @@ class ArrayInfo:
     dtype: "jnp.dtype"
     logical_axes: tuple
     initializer: Callable | None = None
+    layout_major_to_minor: tuple[int, ...] | None = None
 
 
 # module reload friendly isinstance check
@@ -265,8 +267,16 @@ class _Init:
     @classmethod
     def shardings(cls, cfg: Config, *args, **kw):
         abstract = cls.abstract(cfg, *args, **kw)
+
+        def apply_layout(sharding, layout_major_to_minor):
+            if layout_major_to_minor is None:
+                return sharding
+            return Format(Layout(major_to_minor=layout_major_to_minor), sharding)
+
         return jax.tree.map(
-            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules),
+            lambda info: apply_layout(
+                logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules), info.layout_major_to_minor
+            ),
             abstract,
             is_leaf=is_param,
         )
@@ -374,9 +384,7 @@ class AttentionLayer(_Init):
         _init = _he_normal(in_axis=0, out_axis=(1, 2))
         _zero_init = jax.nn.initializers.zeros
         layer = AttentionLayer(
-            q=ArrayInfo(
-                (cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init
-            ),
+            q=ArrayInfo((cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init),
             q_bias=ArrayInfo((cfg.q_heads, cfg.head_dim), cfg.dtype, ("q_heads", "head_dim"), _zero_init),
             k=ArrayInfo(
                 (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init
@@ -386,9 +394,7 @@ class AttentionLayer(_Init):
                 (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init
             ),
             v_bias=ArrayInfo((cfg.kv_heads, cfg.head_dim), cfg.dtype, ("kv_heads", "head_dim"), _zero_init),
-            o=ArrayInfo(
-                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init
-            ),
+            o=ArrayInfo((cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init),
             o_bias=ArrayInfo((cfg.embed,), cfg.dtype, ("o_embed",), _zero_init),
             sinks=ArrayInfo((cfg.head_dim,), cfg.dtype, (None,), _zero_init),
         )
@@ -433,6 +439,7 @@ class MoELayer(_Init):
                 dtype,
                 ("moe_e_experts", "moe_e_up_embed", "moe_e_up_ffw"),
                 _einit,
+                layout_major_to_minor=(0, 1, 2),
             ),
             we_gate_up_bias=ArrayInfo(
                 (cfg.moe_num_experts, 2 * cfg.moe_ffw_size), dtype, ("moe_e_experts", "moe_e_up_ffw"), _zero_init
@@ -442,6 +449,7 @@ class MoELayer(_Init):
                 dtype,
                 ("moe_e_experts", "moe_e_down_ffw", "moe_e_down_embed"),
                 _einit,
+                layout_major_to_minor=(0, 1, 2),
             ),
             we_down_bias=ArrayInfo(
                 (cfg.moe_num_experts, cfg.embed), dtype, ("moe_e_experts", "moe_e_down_embed"), _zero_init
@@ -501,7 +509,7 @@ class Weights(_Init):
         init01, init10 = _he_normal(in_axis=0, out_axis=1), _he_normal(in_axis=1, out_axis=0)
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01, (0, 1)),
             gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init10),
         )
@@ -602,7 +610,7 @@ def apply_rotary_embedding(x: jax.Array, sin: jax.Array, cos: jax.Array) -> jax.
 
 
 def make_attention_mask(
-    q_len, k_len, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal: bool, sliding_window: int | None = None, debug: bool = False
+    q_len, k_len, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal: bool, sliding_window: int | None = None
 ):
     segment_mask = (q_segment_ids[:, :, None] == kv_segment_ids[:, None, :])[:, None, :, :]  # [B, 1, t, T]
     segment_mask &= (q_segment_ids != 0)[:, None, :, None] & (kv_segment_ids != 0)[:, None, None, :]
@@ -836,16 +844,19 @@ def _route_tokens_to_experts(x: jax.Array, weight: jax.Array, bias: jax.Array, r
 def _moe_gmm(lhs, rhs, group_sizes, topk_idx, cfg: Config):
     assert lhs.ndim == 2 and rhs.ndim == 3, f"{lhs.ndim=} != 2 and {rhs.ndim=} != 3"
     group_sizes = group_sizes.astype(jnp.int32)
-    if cfg.use_ragged_dot_kernel and lhs.shape[0] <= 1024 and which_platform(cfg) == "tpu":
+    if cfg.use_ragged_dot_kernel and which_platform(cfg) == "tpu":
         with jax.named_scope("decode_ragged_dot"):
-            block_g, block_n = min(2, rhs.shape[0]), min(128, lhs.shape[0])
+            block_g, block_n, block_compute, block_out = min(1, rhs.shape[0]), min(64, lhs.shape[0]), 32, 2048
+            opts = dict(
+                block_g=block_g, block_n=block_n, block_compute=block_compute, block_out=block_out, interpret=False
+            )
             if is_type(rhs, QuantArray):
                 assert rhs.scale.ndim == 2 and rhs.scale.shape == (rhs.quant.shape[0], rhs.quant.shape[2])
                 scale = jnp.take_along_axis(rhs.scale, topk_idx[:, None], axis=-2)
-                ret = decode_ragged_dot(lhs, rhs.quant, group_sizes, block_g=block_g, block_n=block_n, interpret=False)
+                ret = decode_ragged_dot(lhs, rhs.quant, group_sizes, **opts)
                 ret = ret * scale
             else:
-                ret = decode_ragged_dot(lhs, rhs, group_sizes, block_g=block_g, block_n=block_n, interpret=False)
+                ret = decode_ragged_dot(lhs, rhs, group_sizes, **opts)
     else:
         with jax.named_scope("jax.lax.ragged_dot"):
             if is_type(rhs, QuantArray):
@@ -886,7 +897,13 @@ def moe_block(x: jax.Array, layer: MoELayer, cfg: Config):
     we_down_bias = psc(layer.we_down_bias, we_down_bias_spec)
 
     in_specs = (
-        x_spec, we_gate_up_spec, we_gate_up_bias_spec, we_down_spec, we_down_bias_spec, topk_weights_spec, topk_idx_spec
+        x_spec,
+        we_gate_up_spec,
+        we_gate_up_bias_spec,
+        we_down_spec,
+        we_down_bias_spec,
+        topk_weights_spec,
+        topk_idx_spec,
     )
 
     is_embedding_sharded = l2p("act_embed")[0] is not None
@@ -1063,11 +1080,6 @@ def save_pytree(weights, path):
 def load_pytree(path, sharding=None):
     flat_sharding = odict(("weights" + "".join(map(str, k)), v) for k, v in jax.tree.flatten_with_path(sharding)[0])
     data = jax.tree.unflatten(jax.tree.structure(sharding), jax.tree.leaves(ser.load(path, flat_sharding)))
-    if hasattr(data, "embedding"):  # format for better data layout
-        data.embedding = auto_axes(
-            lambda x: jnp.pad(x, ((0, 0), (0, 128 * math.ceil(x.shape[-1] / 128) - x.shape[-1]))),
-            out_sharding=data.embedding.sharding,
-        )(data.embedding)
     return data
 
 
@@ -1105,23 +1117,40 @@ def prefill(
     next_tokens = jax.jit(partial(jnp.argmax, axis=-1))(logits)
     return next_tokens, logits, cache
 
+
 def sample_top(key: jax.Array, logits: jax.Array, k: int = 16, temp: float = 1.0):
     def sample_multinomial(logits):
         probs = jax.nn.softmax(logits / temp, axis=-1)
-        top_probs, top_tokens = jax.lax.top_k(probs, k=k)
-        idx = jnp.argmax(random.multinomial(key, 1, top_probs), -1)
-        return jnp.take_along_axis(top_tokens, idx[..., None], -1)[..., 0]
+
+        @partial(
+            jax.shard_map,
+            in_specs=(P(), P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME)),
+            out_specs=P(BATCH_AXIS_NAME, None),
+        )
+        def _(key, probs):
+            idx = jax.lax.axis_index(TENSOR_AXIS_NAME)
+            top_probs, top_tokens = jax.lax.approx_max_k(probs, k=k)
+            top_tokens = top_tokens + probs.shape[-1] * idx
+            top_probs = jax.lax.all_gather(top_probs, TENSOR_AXIS_NAME, axis=-1, tiled=True)
+            top_tokens = jax.lax.all_gather(top_tokens, TENSOR_AXIS_NAME, axis=-1, tiled=True)
+            top_probs, idx = jax.lax.top_k(top_probs, k=k)
+            top_tokens = jnp.take_along_axis(top_tokens, idx, -1)
+
+            # by-hand binomial sampling
+            norm_probs = jnp.cumsum(top_probs, axis=-1) / jnp.sum(top_probs, axis=-1)[..., None]
+            idx = jnp.argmax(random.uniform(key, top_probs.shape[:-1])[..., None] <= norm_probs, axis=-1)
+            return jax.lax.pmax(jnp.take_along_axis(top_tokens, idx[..., None], -1)[..., 0], TENSOR_AXIS_NAME)
+
+        return _(key, probs)
+
     return jax.lax.cond(temp > 1e-3, sample_multinomial, partial(jnp.argmax, axis=-1), logits)
 
 
 @partial(jax.jit, donate_argnames=("cache",))
-def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = PAD_ID, key = None):
+def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pad_id: int = PAD_ID, key=None):
     assert last_tokens.ndim == 2
     segment_ids = (last_tokens != pad_id).astype(jnp.int32)
     next_logits, cache = forward(last_tokens, segment_ids, weights, cfg, cache)
-    #next_tokens = jnp.argmax(next_logits, -1)
     key = key if key is not None else random.key(cache.iter)  # poor man's random key
-    next_tokens = auto_axes(sample_top, out_sharding=P(*jax.typeof(next_logits).sharding.spec[:-1]))(
-        key, next_logits, temp=0.7
-    )
+    next_tokens = sample_top(key, next_logits, temp=0.7)
     return reshard(next_tokens, P()), cache

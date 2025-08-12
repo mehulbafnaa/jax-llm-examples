@@ -158,6 +158,9 @@ class Config:
     use_prefill_attn_kernel: bool = False
     use_decode_attn_kernel: bool = False
     use_ragged_dot_kernel: bool = True
+    decode_ragged_dot_tiling: dict[str, int] = dataclasses.field(
+        default_factory=lambda: {"block_g": 1, "block_n": 2**30, "block_compute": 32, "block_out": 2048}
+    )
     dtype: "jnp.dtype" = jnp.bfloat16
     norm_eps: float = 1e-5
     # sharding
@@ -229,7 +232,6 @@ class ArrayInfo:
     dtype: "jnp.dtype"
     logical_axes: tuple
     initializer: Callable | None = None
-    layout_major_to_minor: tuple[int, ...] | None = None
 
 
 # module reload friendly isinstance check
@@ -268,15 +270,8 @@ class _Init:
     def shardings(cls, cfg: Config, *args, **kw):
         abstract = cls.abstract(cfg, *args, **kw)
 
-        def apply_layout(sharding, layout_major_to_minor):
-            if layout_major_to_minor is None:
-                return sharding
-            return Format(Layout(major_to_minor=layout_major_to_minor), sharding)
-
         return jax.tree.map(
-            lambda info: apply_layout(
-                logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules), info.layout_major_to_minor
-            ),
+            lambda info: logical_to_sharding(info.logical_axes, cfg.mesh, cfg.rules),
             abstract,
             is_leaf=is_param,
         )
@@ -439,7 +434,6 @@ class MoELayer(_Init):
                 dtype,
                 ("moe_e_experts", "moe_e_up_embed", "moe_e_up_ffw"),
                 _einit,
-                layout_major_to_minor=(0, 1, 2),
             ),
             we_gate_up_bias=ArrayInfo(
                 (cfg.moe_num_experts, 2 * cfg.moe_ffw_size), dtype, ("moe_e_experts", "moe_e_up_ffw"), _zero_init
@@ -449,7 +443,6 @@ class MoELayer(_Init):
                 dtype,
                 ("moe_e_experts", "moe_e_down_ffw", "moe_e_down_embed"),
                 _einit,
-                layout_major_to_minor=(0, 1, 2),
             ),
             we_down_bias=ArrayInfo(
                 (cfg.moe_num_experts, cfg.embed), dtype, ("moe_e_experts", "moe_e_down_embed"), _zero_init
@@ -509,7 +502,7 @@ class Weights(_Init):
         init01, init10 = _he_normal(in_axis=0, out_axis=1), _he_normal(in_axis=1, out_axis=0)
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01, (0, 1)),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01),
             gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init10),
         )
@@ -846,17 +839,13 @@ def _moe_gmm(lhs, rhs, group_sizes, topk_idx, cfg: Config):
     group_sizes = group_sizes.astype(jnp.int32)
     if cfg.use_ragged_dot_kernel and which_platform(cfg) == "tpu":
         with jax.named_scope("decode_ragged_dot"):
-            block_g, block_n, block_compute, block_out = min(1, rhs.shape[0]), min(64, lhs.shape[0]), 32, 2048
-            opts = dict(
-                block_g=block_g, block_n=block_n, block_compute=block_compute, block_out=block_out, interpret=False
-            )
             if is_type(rhs, QuantArray):
                 assert rhs.scale.ndim == 2 and rhs.scale.shape == (rhs.quant.shape[0], rhs.quant.shape[2])
                 scale = jnp.take_along_axis(rhs.scale, topk_idx[:, None], axis=-2)
-                ret = decode_ragged_dot(lhs, rhs.quant, group_sizes, **opts)
+                ret = decode_ragged_dot(lhs, rhs.quant, group_sizes, **cfg.decode_ragged_dot_tiling)
                 ret = ret * scale
             else:
-                ret = decode_ragged_dot(lhs, rhs, group_sizes, **opts)
+                ret = decode_ragged_dot(lhs, rhs, group_sizes, **cfg.decode_ragged_dot_tiling)
     else:
         with jax.named_scope("jax.lax.ragged_dot"):
             if is_type(rhs, QuantArray):
@@ -1069,6 +1058,13 @@ def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config,
         return logits, dataclasses.replace(cache, iter=(jnp.maximum(0, cache.iter) + additional_tokens) % cache.size)
     else:
         return logits, all_cache_updates
+
+
+def compute_optimal_weights_layouts(weights: Weights, cfg: Config):
+    shapes = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), weights)
+    _forward = lambda weights: forward(*([jnp.ones((16, 1), jnp.int32)] * 2), weights, cfg, cache=None)
+    with jax.sharding.set_mesh(cfg.mesh):
+        return jax.jit(_forward, in_shardings=Format(Layout.AUTO)).trace(shapes).lower().compile().input_formats[0][0]
 
 
 # serialization

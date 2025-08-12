@@ -14,7 +14,6 @@
 
 import os
 import shutil
-from functools import partial
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,7 +26,7 @@ from jax.sharding import PartitionSpec as P
 import torch
 from tqdm import tqdm
 
-from . import model as gpt_jax
+from gpt_oss_jax import model as gpt_jax
 
 
 def quantize_model(ckpt_path: Path, quant_ckpt_path: Path):

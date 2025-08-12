@@ -45,7 +45,8 @@ def decode_ragged_dot_kernel(
     n: int,
     g: int,
 ):
-    pid_g, pid_i = pl.program_id(1), pl.program_id(2)
+    del rhs_idx_map_ref
+    pid_g, pid_i = pl.program_id(1), pl.program_id(2)  # (out column tiles, matrix groups, lhs row tiles)
     (_, k), _, m = x_ref.shape, A_ref.shape[0], A_ref.shape[-1]
     block_n_id = lhs_idx_map_ref[pid_g, pid_i]
 
@@ -125,9 +126,9 @@ def decode_ragged_dot(
     rhs: jax.Array,  # [g, k, m]
     group_sizes: jax.Array,  # g[]
     block_n: int = int(1e20),  # by default replicate activations fully
-    block_g: int = 8,
-    block_out: int = int(1e20),  # by default write full output columns at the same time
+    block_g: int = 2,
     block_compute: int = 8,
+    block_out: int = int(1e20),  # by default write full output columns at the same time
     interpret: bool = False,
 ) -> jax.Array:
     """Computes y = x @ A, x.shape=[n, k], A.shape=[g, k, m]; rows in x are assigned to groups via `group_sizes`.
@@ -145,6 +146,7 @@ def decode_ragged_dot(
         block_n: Splitting rows in x if activations do not fit in VMEM memory - do not use unless necessary.
         block_g: The batch of group entries in A to preload at the same time.
         block_compute: The compute window moving over dimension n.
+        block_out: The tiling of the output columns (to manage vmem usage).
         interpret: Enable the pallas interpret mode.
 
     Returns:
@@ -153,7 +155,7 @@ def decode_ragged_dot(
 
     block_n = min(block_n, lhs.shape[0])
     block_compute = min(block_compute, block_n)
-    block_out = max(128, min(block_out, rhs.shape[-1]))
+    block_out = 128 * pl.cdiv(max(128, min(block_out, rhs.shape[-1])), 128)  # min 128, multiple of 128
     assert rhs.ndim == 3 and lhs.ndim == 2, "lhs must have 2 dims, rhs 3 dims"
     assert rhs.shape[0] % block_g == 0, f"{block_g=} must divide {rhs.shape[0]=} (# of groups) must divide"
     assert block_n % block_compute == 0, f"{block_n = } {block_compute = } {lhs.shape = }"
@@ -221,37 +223,36 @@ def decode_ragged_dot(
         out_shape=out_shape,
         grid_spec=grid_spec,
         interpret=interpret,
-        # do not use, causes segfaults
-        # compiler_params=pltpu.CompilerParams(vmem_limit_bytes=1024 * 1024 * 80),
     )(lhs_idx_map, rhs_idx_map, lhs, rhs, group_sizes.astype(jnp.int32))
 
 
-@partial(jax.jit, static_argnames=("block_n", "block_g", "block_compute"))
+@partial(jax.jit, static_argnames=("block_n", "block_g", "block_compute", "block_out"))
 def decode_ragged_dot_ref(
     lhs: jax.Array,
     rhs: jax.Array,
     group_sizes: jax.Array,
     block_n: int = 64,
     block_g: int = 16,
+    block_out: int = 2**30,
     block_compute: int = 8,
 ) -> jax.Array:
     return jax.lax.ragged_dot(lhs, rhs, group_sizes)
 
 
 def test_tune():
+    from jax.experimental.layout import Format, Layout
     import tune_jax
 
-    tune_jax.tuning.CONFIG.allow_fallback_timing = False
+    tune_jax.CONFIG.allow_fallback_timing = False
+    tune_jax.logger.setLevel("DEBUG")
     seed = 25
-    g, n, k, m = 32, 16, 2880, 1440
+    g, n, k, m = 32, 1024, 2880, 1440
 
     keys = iter(random.split(random.key(seed), 1024))
     x = random.normal(next(keys), (n, k), dtype=jnp.bfloat16)
     A = random.normal(next(keys), (g, k, m), dtype=jnp.bfloat16)
     A = A / jnp.linalg.norm(A, axis=-1)[..., None]
     A = jnp.round(A * 127).astype(jnp.int8)
-    from jax.experimental.layout import Format, Layout
-
     A = jax.device_put(A, Format(Layout((0, 1, 2), tiling=((8, 128), (4, 1))), A.sharding))
 
     group_sizes = jnp.exp(1e-1 * random.uniform(next(keys), g))
@@ -267,8 +268,14 @@ def test_tune():
     print(group_sizes)
     assert jnp.sum(group_sizes) <= n
 
+    # place the inputs with optimal shardings so that no copies for data-reformatting are included in tuning
+    auto_layouts = jax.tree.map(lambda x: Format(Layout.AUTO), (x, A, group_sizes))
+    shapes = jax.tree.map(jax.typeof, (x, A, group_sizes))
+    opt_shrd = jax.jit(decode_ragged_dot, in_shardings=auto_layouts).lower(*shapes).compile().input_formats[0]
+    x, A, group_sizes = jax.device_put((x, A, group_sizes), opt_shrd)
+
     hyperparams = dict(
-        block_n=[8, 16],
+        block_n=[8, 16, 1e20],
         block_compute=[4, 8, 16, 32],
         block_g=[1, 2, 4, 8],
         block_out=[128, 256, 512, 1024, 2048, 4096],

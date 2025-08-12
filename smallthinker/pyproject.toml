@@ -1,0 +1,35 @@
+[project]
+name = "smallthinker_jax"
+version = "0.1.0"
+description = "JAX implementation of SmallThinker"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "torch",
+    "transformers", # for the model config and the tokenizer
+    "tqdm",
+    "numpy",
+    "orbax-checkpoint",
+    "datasets",
+    "gcsfs",
+    "etils",
+    "markupsafe<3.0",
+    "jax[tpu]>=0.6.2",
+]
+
+# we don't need CUDA torch
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cpu"
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["smallthinker_jax"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["pyproject.toml"] }

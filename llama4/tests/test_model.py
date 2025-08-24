@@ -20,8 +20,7 @@ from jax import numpy as jnp
 from jax import random
 from jax.sharding import PartitionSpec as P, AxisType, set_mesh
 try:
-    from jax.sharding import use_mesh
-    set_mesh = use_mesh
+    from jax.sharding import use_mesh as set_mesh  # jax < 0.7.0
 except ImportError:
     pass
 

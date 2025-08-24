@@ -30,7 +30,7 @@ from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P, use_mesh
+from jax.sharding import PartitionSpec as P
 try:
     from jax.experimental.shard import auto_axes as _auto_axes, reshard
 except ModuleNotFoundError:

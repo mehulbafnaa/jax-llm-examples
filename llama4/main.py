@@ -20,7 +20,11 @@ from pprint import pformat
 import jax
 from jax import numpy as jnp
 from jax import random
-from jax.sharding import use_mesh, AxisType, PartitionSpec as P
+from jax.sharding import set_mesh, AxisType, PartitionSpec as P
+try:
+    from jax.sharding import use_mesh as set_mesh
+except ImportError:
+    pass
 import numpy as np
 
 from llama4_jax import model as l4jax
@@ -63,7 +67,7 @@ if __name__ == "__main__":
         ],
     )
 
-    with use_mesh(cfg.mesh):
+    with set_mesh(cfg.mesh):
         zero_cache = l4jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
         next_tokens, logits, cache = l4jax.prefill(input, weights, zero_cache, cfg)
         curr_tokens = next_tokens.at[:, cache.length - 1 : cache.length].get(out_sharding=P(None, None))

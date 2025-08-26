@@ -53,6 +53,7 @@ def main(model_path: str | Path, ckpt_path: str | Path):
         full_path = model_path / f"{additional_file}"
         if not full_path.exists():
             print(f"Could not find {additional_file}, skipping...")
+            continue
         full_path = full_path
         shutil.copyfile(full_path, ckpt_path / full_path.name)
 

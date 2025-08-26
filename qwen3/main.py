@@ -19,7 +19,11 @@ import json
 import jax
 from jax import numpy as jnp
 from jax import random
-from jax.sharding import use_mesh, AxisType, PartitionSpec as P
+from jax.sharding import set_mesh, AxisType, PartitionSpec as P
+try:
+    from jax.sharding import use_mesh as set_mesh  # jax < 0.7.0
+except ImportError:
+    pass
 import numpy as np
 
 from qwen3_jax import model as q3jax
@@ -61,7 +65,7 @@ if __name__ == "__main__":
         ],
     )
 
-    with use_mesh(cfg.mesh):
+    with set_mesh(cfg.mesh):
         zero_cache = q3jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
         next_tokens, logits, cache = q3jax.prefill(input, weights, zero_cache, cfg)
         curr_tokens = next_tokens.at[:, cache.iter - 1 : cache.iter].get(out_sharding=P(None, None))

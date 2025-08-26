@@ -23,6 +23,7 @@ from jax.sharding import set_mesh, AxisType, PartitionSpec as P
 
 try:
     from jax.sharding import use_mesh
+
     set_mesh = use_mesh
 except ImportError:
     pass
@@ -32,10 +33,14 @@ from transformers import AutoTokenizer
 from gpt_oss_jax import model as gpt_jax
 
 
+jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax_cache").expanduser()))
+
+
 def encode_input(tokenizer, texts, pad_id: int = gpt_jax.PAD_ID):
     assert isinstance(texts, list)
     inputs = [
-        tokenizer.apply_chat_template([{"role": "user", "content": text}], add_bos=True, add_generation_prompt=True) for text in texts
+        tokenizer.apply_chat_template([{"role": "user", "content": text}], add_bos=True, add_generation_prompt=True)
+        for text in texts
     ]
     max_len = max([len(x) for x in inputs])
     inputs = [(max_len - len(x)) * [pad_id] + x for x in inputs]
@@ -51,7 +56,7 @@ if __name__ == "__main__":
         ckpt_path = ckpt_path.parent / f"{ckpt_path.name}-quant"
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
 
-    tp = 1
+    tp = 2
     mesh = jax.make_mesh(
         (1, tp, jax.device_count() // tp), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
     )
@@ -64,14 +69,13 @@ if __name__ == "__main__":
             "Tell me your name",
             "What is the weather like expressed in long prose in Old English",
             "Do you like ice cream, be extremely precise",
-        ] + [
-            "Do you like ice cream, be extremely precise"
-        ] * (4 - 3)
+        ]
+        + ["Do you like ice cream, be extremely precise"] * (4 - 3),
     )
-
     weights = gpt_jax.load_pytree(ckpt_path, gpt_jax.Weights.shardings(cfg))
+    weights = jax.device_put(weights, gpt_jax.compute_optimal_weights_layouts(weights, cfg))
 
-    profile = False
+    profile = True
     with set_mesh(cfg.mesh):
         zero_cache = gpt_jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
         next_tokens, logits, cache = gpt_jax.prefill(input, weights, zero_cache, cfg)

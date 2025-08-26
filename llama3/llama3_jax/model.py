@@ -30,7 +30,7 @@ from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P, use_mesh
+from jax.sharding import PartitionSpec as P
 try:
     from jax.experimental.shard import auto_axes as _auto_axes, reshard
 except ModuleNotFoundError:
@@ -849,21 +849,20 @@ def prefill(tokens: jax.Array, weights: Weights, cache: KVCache, cfg: Config, pa
     # Calculate the next power of 2 for padding, up to cfg.max_seq.
     assert tokens.shape[-1] <= cfg.max_seq_len
     pad_to = 2 ** math.ceil(math.log2((tokens.shape[-1])))
-    with use_mesh(cfg.mesh):
-        prompt, prompt_segment_ids = prepare_chunk(tokens, pad_to=pad_to, pad_id=pad_id)
-        assert prompt.ndim == 2
+    prompt, prompt_segment_ids = prepare_chunk(tokens, pad_to=pad_to, pad_id=pad_id)
+    assert prompt.ndim == 2
 
-        cache_shardings = KVCache.shardings(cfg, cache.k[0].shape[0], cache.k[0].shape[cache.time_axis])
-        logits_shardings = jax.sharding.NamedSharding(cfg.mesh, P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME))
+    cache_shardings = KVCache.shardings(cfg, cache.k[0].shape[0], cache.k[0].shape[cache.time_axis])
+    logits_shardings = jax.sharding.NamedSharding(cfg.mesh, P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME))
 
-        cache = dataclasses.replace(
-            cache, length=jnp.zeros_like(cache.length), starts=_count_left_padding(tokens, pad_id=pad_id)
-        )
-        logits, cache = jax.jit(forward, donate_argnums=(4,), out_shardings=(logits_shardings, cache_shardings))(
-            prompt, prompt_segment_ids, weights, cfg, cache
-        )
-        next_tokens = jax.jit(jnp.argmax, static_argnames=("axis",))(logits, axis=-1)
-        return next_tokens, logits, cache
+    cache = dataclasses.replace(
+        cache, length=jnp.zeros_like(cache.length), starts=_count_left_padding(tokens, pad_id=pad_id)
+    )
+    logits, cache = jax.jit(forward, donate_argnums=(4,), out_shardings=(logits_shardings, cache_shardings))(
+        prompt, prompt_segment_ids, weights, cfg, cache
+    )
+    next_tokens = jax.jit(jnp.argmax, static_argnames=("axis",))(logits, axis=-1)
+    return next_tokens, logits, cache
 
 
 @partial(jax.jit, donate_argnames=("cache",))

@@ -17,6 +17,7 @@ dependencies = [
     "etils",
     "markupsafe<3.0",
     "jax[tpu]>=0.6.2",
+    "huggingface-hub>=0.34.4",
 ]
 
 # we don't need CUDA torch

@@ -22,19 +22,31 @@ def convert_model_or_layer(weights, torch_weights, cfg, sequential=False):
     def unpermute(w, num_heads, axis=0):
         return w.reshape(w.shape[0], num_heads, cfg.head_dim).swapaxes(axis, axis + 1).reshape(w.shape)
 
+    print(f"Converting {cfg.num_layers} layers...")
+    print(f"Available torch_weights keys (first 10): {list(torch_weights.keys())[:10]}")
+    
     for i in range(cfg.num_layers):
-        # Attention weights
-        weights.layers[i].q.quant = jnp.asarray(unpermute(torch_weights[f"model.layers.{i}.self_attn.q_proj.weight"].T, cfg.q_heads).to(torch.float32).numpy())
-        weights.layers[i].k.quant = jnp.asarray(unpermute(torch_weights[f"model.layers.{i}.self_attn.k_proj.weight"].T, cfg.kv_heads).to(torch.float32).numpy())
-        weights.layers[i].v.quant = jnp.asarray(unpermute(torch_weights[f"model.layers.{i}.self_attn.v_proj.weight"].T, cfg.kv_heads).to(torch.float32).numpy())
-        weights.layers[i].o.quant = jnp.asarray(torch_weights[f"model.layers.{i}.self_attn.o_proj.weight"].T.to(torch.float32).numpy())
+        # Attention weights (no .quant since quant_layer=False)
+        # Reshape: PyTorch (embed, heads*head_dim) -> JAX (embed, heads, head_dim)
+        q_torch = torch_weights[f"model.layers.{i}.self_attn.q_proj.weight"].T.to(torch.float32).numpy()
+        weights.layers[i].q = jnp.asarray(unpermute(q_torch, cfg.q_heads).reshape(cfg.embed, cfg.q_heads, cfg.head_dim))
+        
+        k_torch = torch_weights[f"model.layers.{i}.self_attn.k_proj.weight"].T.to(torch.float32).numpy()
+        weights.layers[i].k = jnp.asarray(unpermute(k_torch, cfg.kv_heads).reshape(cfg.embed, cfg.kv_heads, cfg.head_dim))
+        
+        v_torch = torch_weights[f"model.layers.{i}.self_attn.v_proj.weight"].T.to(torch.float32).numpy()
+        weights.layers[i].v = jnp.asarray(unpermute(v_torch, cfg.kv_heads).reshape(cfg.embed, cfg.kv_heads, cfg.head_dim))
+        
+        # o_proj: PyTorch (heads*head_dim, embed) -> JAX (heads, head_dim, embed)
+        o_torch = torch_weights[f"model.layers.{i}.self_attn.o_proj.weight"].T.to(torch.float32).numpy()
+        weights.layers[i].o = jnp.asarray(o_torch.reshape(cfg.q_heads, cfg.head_dim, cfg.embed))
 
-        # MoE weights
-        weights.layers[i].moe_router.quant = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.primary_router.weight"].T.to(torch.float32).numpy())
+        # MoE weights (no .quant since quant_layer=False)
+        weights.layers[i].moe_router = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.primary_router.weight"].T.to(torch.float32).numpy())
         for j in range(cfg.moe_num_experts):
-            weights.layers[i].moe_layers[j].gate.quant = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.gate.weight"].T.to(torch.float32).numpy())
-            weights.layers[i].moe_layers[j].up.quant = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.up.weight"].T.to(torch.float32).numpy())
-            weights.layers[i].moe_layers[j].down.quant = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.down.weight"].T.to(torch.float32).numpy())
+            weights.layers[i].moe_layers[j].gate = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.gate.weight"].T.to(torch.float32).numpy())
+            weights.layers[i].moe_layers[j].up = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.up.weight"].T.to(torch.float32).numpy())
+            weights.layers[i].moe_layers[j].down = jnp.asarray(torch_weights[f"model.layers.{i}.block_sparse_moe.experts.{j}.down.weight"].T.to(torch.float32).numpy())
 
         # RMSNorm weights
         weights.layers[i].attn_pre_gamma = jnp.asarray(torch_weights[f"model.layers.{i}.input_layernorm.weight"].to(torch.float32).numpy())

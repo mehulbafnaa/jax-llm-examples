@@ -634,18 +634,18 @@ def ffn_block(x: jax.Array, layer: Layer, cfg: Config):
         expert_layer = layer.moe_layers[i]
         expert_mask = jnp.any(selected_experts == i, axis=-1)
         
-        if jnp.any(expert_mask):
-            ff_gate = jax.nn.silu(einsum("btd,df->btf", x, expert_layer.gate)).astype(cfg.dtype)
-            ff_up = einsum("btd,df->btf", x, expert_layer.up).astype(cfg.dtype)
-            ff_out = einsum("btf,fd->btd", ff_gate * ff_up, expert_layer.down).astype(cfg.dtype)
-            
-            # Expand routing_weights to match ff_out's shape for broadcasting
-            expanded_routing_weights = routing_weights[..., None]
-            
-            # Select the correct routing weight for the expert
-            expert_routing_weights = jnp.sum(expanded_routing_weights * (selected_experts == i)[..., None], axis=-2)
-            
-            final_hidden_states += ff_out * expert_routing_weights[..., None] * expert_mask[..., None]
+        # Always compute (masking will zero out inactive experts)
+        ff_gate = jax.nn.silu(einsum("btd,df->btf", x, expert_layer.gate)).astype(cfg.dtype)
+        ff_up = einsum("btd,df->btf", x, expert_layer.up).astype(cfg.dtype)
+        ff_out = einsum("btf,fd->btd", ff_gate * ff_up, expert_layer.down).astype(cfg.dtype)
+        
+        # Create expert selection mask and get routing weights
+        expert_selection = (selected_experts == i)  # [batch, seq, num_active]
+        expert_routing_weights = jnp.sum(routing_weights * expert_selection, axis=-1)  # [batch, seq]
+        
+        # Apply mask and routing weights
+        expert_weight = expert_routing_weights[..., None] * expert_mask[..., None]  # [batch, seq, 1]
+        final_hidden_states += ff_out * expert_weight
 
     return final_hidden_states
 

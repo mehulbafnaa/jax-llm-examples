@@ -33,7 +33,8 @@ def encode_input(tokenizer, texts: list[str], pad_id: int = 0):
         for text in texts
     ]
     max_len = max([len(x) for x in inputs])
-    inputs = [(max_len - len(x)) * [pad_id] + x for x in inputs]
+    # Use right padding instead of left padding
+    inputs = [x + (max_len - len(x)) * [pad_id] for x in inputs]
     return np.array(inputs)
 
 
@@ -92,7 +93,7 @@ if __name__ == "__main__":
         "Tell me your name",
         "What is the weather like expressed in long prose in Old English", 
         "Do you like ice cream, be extremely precise",
-        "Explain quantum computing in simple terms",  # Add 4th example for divisibility
+        "what is the 2 + 2",  # Add 4th example for divisibility
     ]
     input_tokens = encode_input(tokenizer, input_texts)
 

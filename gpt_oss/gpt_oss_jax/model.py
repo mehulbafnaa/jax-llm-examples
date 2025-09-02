@@ -47,6 +47,7 @@ PAD_ID = 199999
 
 AxisName = str | tuple[str, ...] | None
 Axes = tuple[AxisName, ...]
+AutoTokenizer = Any
 
 # Expected physical mesh axis names:
 # x - batch
@@ -55,7 +56,7 @@ Axes = tuple[AxisName, ...]
 BATCH_AXIS_NAME = "x"
 EXPERT_AXIS_NAME = "z"
 TENSOR_ONLY_AXIS_NAME = "y"
-ATTN_HEADS_AXIS_NAME = "z"
+ATTN_HEADS_AXIS_NAME = "y"
 TENSOR_AXIS_NAME = ("y", "z")
 
 
@@ -210,19 +211,10 @@ def load_config(config_path: str | os.PathLike[str] | Path) -> "Config":
     return hf_to_jax_config(json.loads(Path(config_path).read_text()))
 
 
-def load_tokenizer(
-    tokenizer_path: str | os.PathLike[str] | Path, tokenizer_config_path: str | os.PathLike[str] | Path
-) -> "PreTrainedTokenizerFast":  # noqa: F821
-    from transformers import PreTrainedTokenizerFast, AddedToken
+def load_tokenizer(chkpt_path: str | os.PathLike[str] | Path) -> AutoTokenizer:  # noqa: F821
+    from transformers import AutoTokenizer
 
-    config = json.loads(Path(tokenizer_config_path).read_text())
-    config = {
-        k: AddedToken(**v) if isinstance(v, dict) and str(k).endswith("token") else v for (k, v) in config.items()
-    }
-    config["added_tokens_decoder"] = {
-        int(k): AddedToken(**v) for (k, v) in config.get("added_tokens_decoder", dict()).items()
-    }
-    return PreTrainedTokenizerFast(tokenizer_file=str(tokenizer_path), **config)
+    return AutoTokenizer.from_pretrained(chkpt_path)
 
 
 @partial(jax_pytree_struct, meta_fields=("shape", "logical_axes", "initializer"))
@@ -508,7 +500,7 @@ class Weights(_Init):
         )
 
 
-@partial(jax_pytree_struct, meta_fields=["time_axis", "size"])
+@partial(jax_pytree_struct, meta_fields=["time_axis", "size", "get_sequence", "insert_sequences"])
 class KVCache(_Init):
     k: list[jax.Array]  # (batch_size, key_heads, max_seq_len, head_dim)
     v: list[jax.Array]  # (batch_size, key_heads, max_seq_len, head_dim)
@@ -516,6 +508,8 @@ class KVCache(_Init):
     starts: jax.Array  # [batch_size]  # sequences are right-aligned, we need start indices
     time_axis: int = 2
     size: int = -1
+    get_sequence: Callable | None = None
+    insert_sequences: Callable | None = None
 
     @classmethod
     def abstract(cls, cfg: Config, batch_size: int, max_seq_len: int):

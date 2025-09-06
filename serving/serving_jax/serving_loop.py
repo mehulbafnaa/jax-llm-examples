@@ -16,7 +16,6 @@ import contextlib
 import dataclasses
 import json
 import math
-from pprint import pformat
 import threading
 import time
 import traceback
@@ -30,18 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax._src import distributed
 from jax.sharding import Mesh, NamedSharding, set_mesh
-from jax.sharding import PartitionSpec as P
-
-try:
-    from jax.experimental.shard import auto_axes
-except ModuleNotFoundError:
-    from jax.sharding import auto_axes
-try:
-    from jax.sharding import use_mesh
-
-    set_mesh = use_mesh
-except ImportError:
-    pass
+from jax.sharding import PartitionSpec as P, auto_axes
 
 from .cross_host import transfer_tree_A2B
 
@@ -509,7 +497,7 @@ like_shard = lambda z, mesh: jax.tree.map(lambda x: NamedSharding(mesh, jax.type
 _make_empty = lambda x, mesh: jax.make_array_from_single_device_arrays(
     x.shape, NamedSharding(mesh, jax.typeof(x).sharding.spec), [], dtype=x.dtype
 )
-which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
+which_platform = lambda mesh: mesh.devices.reshape(-1)[0].platform
 
 
 def maybe_call(fn: Callable, mesh: Mesh):
@@ -551,8 +539,6 @@ class ServingLoop:
         decode_cache_wrapper: AttentionWrapper,
         is_server: bool = False,
     ):
-        if not SyncServer.broadcast("welcome", 0, is_server, is_server):
-            raise ValueError("Neither this proccess nor any other processe is the main server, at least one must.")
         self.serve_cfg, self.cfg = serve_cfg, cfg
 
         # setup decode #

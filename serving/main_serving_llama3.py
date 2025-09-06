@@ -56,7 +56,7 @@ tokenizer_encode = lambda tokenizer, text: encode_input(tokenizer, [text])[0].to
 tokenizer_decode = lambda tokenizer, tokens: tokenizer.decode(tokens)
 
 
-def distributed_init():
+def distributed_init(is_coordinator: bool):
     # for TPU
     jax.distributed.initialize()
 
@@ -65,13 +65,16 @@ def distributed_init():
     # jax.distributed.initialize(os.environ["COORDINATOR_ADDRESS"], 2, process_idx)
     # jax.distributed.initialize()
 
+    if not serving.SyncServer.broadcast("welcome", 0, is_coordinator, is_coordinator):
+        raise ValueError("Neither this proccess nor any other processe is the main server, exactly one must.")
+
 
 def main():
     parser = ArgumentParser()
     parser.add_argument("--server", action="store_true", help="Make this node the main server.", default=False)
     ARGS = parser.parse_args()
 
-    distributed_init()
+    distributed_init(ARGS.server)
     devices = jax.devices()  # this helps catch distributed errors quickly
 
     model_name = "Llama-3.1-8B-Instruct-quant"

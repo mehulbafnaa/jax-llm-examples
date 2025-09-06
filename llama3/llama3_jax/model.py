@@ -21,7 +21,6 @@ from pathlib import Path
 import math
 from functools import partial
 from typing import Callable, Any, TypeVar
-from inspect import signature
 from collections import OrderedDict as odict
 
 import jax
@@ -31,12 +30,8 @@ from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from jax.experimental.array_serialization import pytree_serialization as ser
-try:
-    from jax.experimental.shard import auto_axes as _auto_axes, reshard
-except ModuleNotFoundError:
-    from jax.sharding import auto_axes as _auto_axes, reshard
 from jax.experimental.pallas.ops.gpu import paged_attention
 from etils import epath
 
@@ -89,11 +84,6 @@ class ShardingRules:
     # vocab
     vocab_in: AxisName = None
     vocab_out: AxisName = TENSOR_AXIS_NAME
-
-
-def auto_axes(x, out_sharding):  # TOOD(rdyro): remove once in JAX >= 0.7.0
-    argname = "out_sharding" if "out_sharding" in signature(_auto_axes).parameters else "out_shardings"
-    return _auto_axes(x, **{argname: out_sharding})
 
 
 def logical_to_physical(logical: Axes, rules: ShardingRules) -> jax.sharding.PartitionSpec:

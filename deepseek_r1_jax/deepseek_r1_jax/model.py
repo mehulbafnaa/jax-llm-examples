@@ -24,7 +24,6 @@ from etils import epath
 import gzip
 import json
 from pathlib import Path
-from warnings import warn
 
 import jax
 import jax.numpy as jnp
@@ -855,7 +854,6 @@ def attention_kernel(
             v = (v * v_scale[..., None]).astype(jnp.bfloat16)
         k = jnp.concatenate([k_nope, jnp.broadcast_to(k_pe, k_nope.shape[:-1] + k_pe.shape[-1:])], -1)
         q = jnp.concatenate([q_nope, q_pe], -1)
-        # jax.debug.print("Using a static mask: {}", jnp.all(q_offset == kv_offset))
         return jax.lax.cond(
             jnp.all(q_offset == kv_offset), attn_static_fn, attn_dynamic_fn, q * scale, k, v, segment_ids
         )

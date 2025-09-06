@@ -31,15 +31,8 @@ from jax import tree_util
 from jax.experimental.layout import Format, Layout
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-
-# from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from jax.experimental.array_serialization import pytree_serialization as ser
-
-try:
-    from jax.experimental.shard import auto_axes as _auto_axes, reshard
-except ModuleNotFoundError:
-    from jax.sharding import auto_axes as _auto_axes, reshard
 
 from .decode_ragged_dot import decode_ragged_dot
 
@@ -100,11 +93,6 @@ class ShardingRules:
     vocab_out: AxisName = TENSOR_AXIS_NAME
 
 
-def auto_axes(x, out_sharding):  # TOOD(rdyro): remove once in JAX >= 0.7.0
-    argname = "out_sharding" if "out_sharding" in signature(_auto_axes).parameters else "out_shardings"
-    return _auto_axes(x, **{argname: out_sharding})
-
-
 def logical_to_physical(logical: Axes, rules: ShardingRules) -> jax.sharding.PartitionSpec:
     """Returns how to physically shard a given sequence of logical array dimensions (i.e. the logical shape of an array)."""
     spec = [getattr(rules, axis) if axis is not None else None for axis in logical]
@@ -153,7 +141,7 @@ class Config:
     moe_num_experts: int
     moe_gate_up_alpha: float = 1.702
     moe_gate_up_limit: float = 7.0
-    moe_gate_dtype: "jnp.dtype" = jnp.float32
+    moe_gate_dtype: jnp.dtype = jnp.float32
     ep_strategy: str = "decode"
     # kernel config
     use_prefill_attn_kernel: bool = False
@@ -176,7 +164,10 @@ class Config:
     quant_moe: bool = False
     quant_attn: bool = False  # OpenAI doesn't seem to use this, i.e., always False
     quant_cache: bool = True
-    quant_scale_dtype: "jnp.dtype" = jnp.bfloat16
+    quant_scale_dtype: jnp.dtype = jnp.bfloat16
+    # sampling
+    sample_topk: int = 4
+    sample_temp: float = 0.7
 
 
 def hf_to_jax_config(hf_config: Any | dict[str, Any]) -> "Config":
@@ -643,7 +634,6 @@ def attention(
     Returns:
     Attention output of shape (batch_size, num_heads, q_len, head_dim)
     """
-    del starts, lengths
 
     scale = cfg.head_dim**-0.5
 
@@ -670,12 +660,22 @@ def attention(
     return qkv.reshape((b, qh, t, d))
 
 
-def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths, cfg: Config):
-    """Flash attention kernel!"""
-
-    # On TPUv3, pallas seems to only work with float32.
-    # q, k, v = jnp.float32(q), jnp.float32(k), jnp.float32(v)
-
+def attention_kernel(
+    q: jax.Array,
+    k: jax.Array | tuple[jax.Array, jax.Array],
+    v: jax.Array | tuple[jax.Array, jax.Array],
+    sinks: jax.Array,
+    q_segment_ids: jax.Array,
+    kv_segment_ids: jax.Array,
+    q_offset: jax.Array,
+    kv_offset: jax.Array,
+    starts: jax.Array,
+    lengths: jax.Array,
+    *,
+    sliding_window: int | None = None,
+    cfg: Config,
+) -> jax.Array:
+    del starts, lengths
     k, k_scale = (k.quant, k.scale) if is_type(k, QuantArray) else (k, None)
     v, v_scale = (v.quant, v.scale) if is_type(v, QuantArray) else (v, None)
 
@@ -685,60 +685,72 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset
 
     l2p = lambda *logical: logical_to_physical(logical, cfg.rules)
 
-    kv_repeats = q.shape[-3] // k.shape[-3]
-    q_spec = P(
-        *(l2p("batch", "kv_heads") + tuple(set(*l2p("q_heads")) - set(*l2p("kv_heads"))) + l2p("sequence", "head_dim"))
-    )
-    q_shape__ = q.shape
+    q_shape, kv_repeats = q.shape, q.shape[-3] // k.shape[-3]
+    kv_repeats_spec = tuple(set(*l2p("q_heads")) - set(*l2p("kv_heads")))
+    kv_repeats_spec = kv_repeats_spec if len(kv_repeats_spec) > 0 else (None,)
+    q_spec = P(*(l2p("batch", "kv_heads") + kv_repeats_spec + l2p("sequence", "head_dim")))
     q = jax.lax.reshape(q, (q.shape[:-3] + (k.shape[-3], kv_repeats, q.shape[-2], q.shape[-1])), out_sharding=q_spec)
+    sinks_spec = P(q_spec[1], q_spec[2])
+    sinks = jax.lax.reshape(sinks, (q.shape[-4], q.shape[-3]), out_sharding=sinks_spec)
 
     # shard_map
     in_specs = (
-        q_spec,
-        l2p("batch", "kv_heads", "sequence", "head_dim"),
-        l2p("batch", "kv_heads", "sequence", "head_dim"),
-        l2p("batch", "sequence"),
-        l2p("batch", "sequence"),
-        l2p("batch"),
-        l2p("batch"),
+        q_spec,  # q
+        l2p("batch", "kv_heads", "sequence", "head_dim"),  # k
+        l2p("batch", "kv_heads", "sequence", "head_dim"),  # v
+        sinks_spec,  # sinks
+        l2p("batch", "sequence"),  # q_segment_ids
+        l2p("batch", "sequence"),  # kv_segment_ids
+        l2p("batch"),  # q_offset
+        l2p("batch"),  # kv_offset
     )
-    in_specs += (None if k_scale is None else l2p("batch", "kv_heads", "sequence"),)
-    in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)
-    out_specs = q_spec
+    in_specs += (None if k_scale is None else l2p("batch", "kv_heads", "sequence"),)  # k_scales
+    in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)  # v_scales
 
-    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
-    def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
-        q_org_shape = q.shape
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=q_spec, check_vma=False)
+    def _f(q, k, v, sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale) -> jax.Array:
+        q_seq, kv_seq, kv_heads = q.shape[-2], v.shape[-2], v.shape[-3]
+        block_q, block_kv = min(q_seq, 512), min(kv_seq, 1024)
+        block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
 
-        if q.shape[-2] != 1:
-            mask = mask_lib.MultiHeadMask([mask_lib.CausalMask((q.shape[-2], k.shape[-2])) for _ in range(q.shape[-3])])
-            block_q, block_kv = min(q.shape[-2], 512), min(k.shape[-2], 1024)
-            block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
-            attn_fn = splash.make_splash_mqa_single_device(mask=mask, block_sizes=block_sizes)
-            attn_fn = jax.vmap(jax.vmap(attn_fn, in_axes=(0, 0, 0, None)), in_axes=(0, 0, 0, 0))
+        # for prefill with an empty cache
+        mask = mask_lib.MultiHeadMask([
+            mask_lib.LogicalAnd(
+                mask_lib.CausalMask((q_seq, kv_seq)), mask_lib.LocalMask((q_seq, kv_seq), (sliding_window, None), 0)
+            )
+            for _ in range(q.shape[-3])
+        ])
+        attn_static_fn = lambda q, k, v, segment_ids, sinks: splash.make_splash_mqa_single_device(
+            mask=mask, block_sizes=block_sizes
+        )(q, k, v, segment_ids, sinks=sinks)
+        attn_static_fn = jax.vmap(attn_static_fn, in_axes=(0, 0, 0, 0, None))  # vmap over batch
+        attn_static_fn = jax.vmap(attn_static_fn, in_axes=(0, 0, 0, None, 0))  # vmap over kv heads
 
-            segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
-            if k_scale is not None:
-                k = (k * k_scale[..., None]).astype(jnp.bfloat16)
-            if v_scale is not None:
-                v = (v * v_scale[..., None]).astype(jnp.bfloat16)
-            ret = attn_fn(q * scale, k, v, segment_ids)
-        else:
-            assert q.shape[-2] == 1, "This is a decode kernel, q.shape[-2] must be 1"
-            q = q[..., 0, :]
-            in_axes = (1, 1, 1, None, None)
-            in_axes += ((None if k_scale is None else 1),)
-            in_axes += ((None if v_scale is None else 1),)
-            hyperparams = dict(scale=scale, block_kv=512, block_bs=32)
-            raise NotImplementedError
-            # ret = jax.vmap(partial(ragged_attention.ragged_decode_fwd, **hyperparams), in_axes=in_axes, out_axes=1)(
-            #     q, k, v, starts, lengths, k_scale, v_scale
-            # )
-        return ret.reshape(q_org_shape)
+        # when the offsets are different (chunked prefill)
+        def attn_dynamic_fn(q, k, v, segment_ids, sinks):
+            mask = make_attention_mask(
+                q_seq, kv_seq, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal=True,
+                sliding_window=sliding_window
+            )
+            mask = jnp.broadcast_to(mask, (mask.shape[0], q.shape[-3], mask.shape[-2], mask.shape[-1]))
+            attn_fn = lambda q, k, v, segment_ids, sinks, mask: splash.make_splash_mqa_single_device(
+                mask=mask, block_sizes=block_sizes
+            )(q, k, v, segment_ids, sinks=sinks)
+            attn_fn = jax.vmap(attn_fn, in_axes=(0, 0, 0, 0, None, 0))  # vmap over batch
+            attn_fn = jax.vmap(attn_fn, in_axes=(0, 0, 0, None, 0, None))  # vmap over kv heads
+            return attn_fn(q, k, v, segment_ids, sinks, mask)
 
-    lengths = jnp.broadcast_to(lengths, starts.shape)
-    ret = _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale).astype(jnp.bfloat16)
-    return jax.lax.reshape(ret, q_shape__, out_sharding=l2p("batch", "q_heads", "sequence", "head_dim"))
+        segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
+        if k_scale is not None:
+            k = (k * k_scale[..., None]).astype(jnp.bfloat16)
+        if v_scale is not None:
+            v = (v * v_scale[..., None]).astype(jnp.bfloat16)
+        return jax.lax.cond(
+            jnp.all(q_offset == kv_offset), attn_static_fn, attn_dynamic_fn, q * scale, k, v, segment_ids, sinks
+        )
+
+    out = _f(q, k, v, sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale).astype(jnp.bfloat16)
+    return jax.lax.reshape(out, q_shape, out_sharding=l2p("batch", "q_heads", "sequence", "head_dim"))
 
 
 def rms_norm(x: jax.Array, gamma: jax.Array | None, eps: jax.Array | float) -> jax.Array:
@@ -797,8 +809,8 @@ def attention_block(
     # Compute attention
     with jax.named_scope("attention"):
         attn_args = (q, k, v, layer.sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths)
-        if (cfg.use_prefill_attn_kernel and q.shape[-2] != 1) or (cfg.use_decode_attn_kernel and q.shape[-2] == 1):
-            raise NotImplementedError
+        if cfg.use_prefill_attn_kernel and q.shape[-2] != 1:
+            raise NotImplementedError("Needs fixes to splash attention to support sinks.")
             attn_out = attention_kernel(*attn_args, cfg=cfg, sliding_window=sliding_window)
         else:
             attn_out = attention(*attn_args, cfg=cfg, sliding_window=sliding_window)
@@ -1054,17 +1066,27 @@ def forward(x: jax.Array, segment_ids: jax.Array, weights: Weights, cfg: Config,
         return logits, all_cache_updates
 
 
-def compute_optimal_weights_layouts(weights: Weights, cfg: Config):
-    shapes = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), weights)
-    _forward = lambda weights: forward(*([jnp.ones((16, 1), jnp.int32)] * 2), weights, cfg, cache=None)
+def optimal_formats(cfg: Config):
+    SDS, tree_map, bs = jax.ShapeDtypeStruct, partial(jax.tree.map, is_leaf=is_param), 16
+    weights_abstract, cache_abstract = Weights.abstract(cfg), KVCache.abstract(cfg, bs, cfg.max_seq_len)
+    weights_shardings, cache_shardings = Weights.shardings(cfg), KVCache.shardings(cfg, bs, cfg.max_seq_len)
+    weights_shapes = tree_map(lambda x, s: SDS(x.shape, x.dtype, sharding=s), weights_abstract, weights_shardings)
+    cache_shapes = tree_map(lambda x, s: SDS(x.shape, x.dtype, sharding=s), cache_abstract, cache_shardings)
+    _forward = lambda weights, cache: forward(*([jnp.ones((bs, 1), jnp.int32)] * 2), weights, cfg, cache=cache)
     with jax.sharding.set_mesh(cfg.mesh):
-        return jax.jit(_forward, in_shardings=Format(Layout.AUTO)).trace(shapes).lower().compile().input_formats[0][0]
+        fn = jax.jit(
+            _forward, in_shardings=Format(Layout.AUTO), out_shardings=Format(Layout.AUTO), donate_argnames=("cache",)
+        )
+        weights_formats, cache_formats = fn.trace(weights_shapes, cache_shapes).lower().compile().input_formats[0]
+    weights = tree_map(lambda x, f: SDS(x.shape, x.dtype, sharding=f), weights_abstract, weights_formats)
+    cache = tree_map(lambda x, f: SDS(x.shape, x.dtype, sharding=f), cache_abstract, cache_formats)
+    return weights, cache
 
 
 # serialization
 def save_pytree(weights, path):
     flat_data = odict(("weights" + "".join(map(str, k)), v) for k, v in jax.tree.flatten_with_path(weights)[0])
-    ser.save(flat_data, path)  # save a flatten with path to avoid custom
+    ser.save(flat_data, path)  # save a flatten-with-path to avoid custom nodes
 
 
 def load_pytree(path, sharding=None):
@@ -1111,12 +1133,9 @@ def prefill(
 def sample_top(key: jax.Array, logits: jax.Array, k: int = 16, temp: float = 1.0):
     def sample_multinomial(logits):
         probs = jax.nn.softmax(logits / temp, axis=-1)
+        in_specs = (P(), P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME))
 
-        @partial(
-            jax.shard_map,
-            in_specs=(P(), P(BATCH_AXIS_NAME, None, TENSOR_AXIS_NAME)),
-            out_specs=P(BATCH_AXIS_NAME, None),
-        )
+        @partial(jax.shard_map, in_specs=in_specs, out_specs=P(BATCH_AXIS_NAME, None))
         def _(key, probs):
             idx = jax.lax.axis_index(TENSOR_AXIS_NAME)
             top_probs, top_tokens = jax.lax.approx_max_k(probs, k=k)
@@ -1142,5 +1161,5 @@ def decode_step(last_tokens: jax.Array, weights: Weights, cache: KVCache, cfg: C
     segment_ids = (last_tokens != pad_id).astype(jnp.int32)
     next_logits, cache = forward(last_tokens, segment_ids, weights, cfg, cache)
     key = key if key is not None else random.key(cache.iter)  # poor man's random key
-    next_tokens = sample_top(key, next_logits, temp=0.7)
+    next_tokens = sample_top(key, next_logits, k=cfg.sample_topk, temp=cfg.sample_temp)
     return reshard(next_tokens, P()), cache

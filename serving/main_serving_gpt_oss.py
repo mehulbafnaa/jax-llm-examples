@@ -58,7 +58,7 @@ tokenizer_encode = lambda tokenizer, text: encode_input(tokenizer, [text])[0].to
 tokenizer_decode = lambda tokenizer, tokens: tokenizer.decode(tokens)
 
 
-def distributed_init():
+def distributed_init(is_coordinator: bool):
     # for TPU
     jax.distributed.initialize()
 
@@ -67,13 +67,16 @@ def distributed_init():
     # jax.distributed.initialize(os.environ["COORDINATOR_ADDRESS"], 2, process_idx)
     # jax.distributed.initialize()
 
+    if not serving.SyncServer.broadcast("welcome", 0, is_coordinator, is_coordinator):
+        raise ValueError("Neither this proccess nor any other processe is the main server, exactly one must.")
+
 
 def main():
     parser = ArgumentParser()
     parser.add_argument("--server", action="store_true", help="Make this node the main server.", default=False)
     ARGS = parser.parse_args()
 
-    distributed_init()
+    distributed_init(ARGS.server)
     devices = jax.devices()  # this helps catch distributed errors quickly
 
     model_name = "gpt_oss_20b-quant"
@@ -92,6 +95,7 @@ def main():
 
     weights_formats, decode_cache_formats = gpt_jax.optimal_formats(dataclasses.replace(cfg, mesh=decode_mesh))
     decode_weights = gpt_jax.load_pytree(ckpt_path, weights_formats)
+
     weights_formats, prefill_cache_formats = gpt_jax.optimal_formats(dataclasses.replace(cfg, mesh=prefill_mesh))
     # prefill_weights = gpt_jax.load_pytree(ckpt_path, weights_formats)
     prefill_weights = decode_weights
@@ -104,6 +108,7 @@ def main():
     decode_cache = serving.AttentionWrapper(
         decode_cache, attn_utils.kvcache_get_sequence, attn_utils.kvcache_insert_sequences
     )
+    # alternatively use the PagedKVCache for models that have it implemneted already (slower for shorter sequences)
     # decode_cache = gpt_jax.PagedKVCache.init(random.key(0), cfg, serve_cfg.decode_batch_size, 2048, 32)
     # decode_cache = serving.AttentionWrapper(
     #     decode_cache, attn_utils.paged_kvcache_get_sequence, attn_utils.paged_kvcache_insert_sequences

@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="2280" height="1580" viewBox="0 0 2280 1580">
+<defs>
+</defs>
+<rect x="0" y="0" width="2280" height="120000" fill="white" stroke="0" stroke-width="0" />
+<rect x="10" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="90" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="170" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="250" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="10" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="90" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="170" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="250" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="10" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="90" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="170" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="250" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="370.0" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="370.0" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="370.0" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="490.0" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="490.0" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="490.0" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="371.0" y="641" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="410.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">7</text>
+<text x="50.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">H</text>
+<text x="130.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">o</text>
+<text x="210.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">w</text>
+<text x="290.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="371.0" y="781" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="410.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">F</text>
+<text x="50.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">W</text>
+<text x="130.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">h</text>
+<text x="210.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="290.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">t</text>
+<rect x="371.0" y="921" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="410.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">9</text>
+<text x="50.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">I</text>
+<text x="130.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">'</text>
+<text x="210.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">m</text>
+<text x="290.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="11" y="921" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<rect x="91" y="921" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<rect x="171" y="921" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<rect x="251" y="921" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<rect x="800" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="430" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1161.0" y="151" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">E</text>
+<text x="840.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="920.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">r</text>
+<text x="1000.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">e</text>
+<text x="1080.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="1161.0" y="291" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">1</text>
+<text x="840.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">i</text>
+<text x="920.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">s</text>
+<text x="1000.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<text x="1080.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">i</text>
+<rect x="1161.0" y="431" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="500.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="801" y="431" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="881" y="431" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="961" y="431" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1041" y="431" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="20" y="20" width="80" height="140" fill="white" stroke="black" stroke-width="1" />
+<rect x="100" y="20" width="80" height="140" fill="white" stroke="black" stroke-width="1" />
+<rect x="180" y="20" width="80" height="140" fill="white" stroke="black" stroke-width="1" />
+<rect x="21" y="21" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<text x="60.0" y="90.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">9<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.2;0.26;1;1;1" repeatCount="indefinite" fill="freeze" /></text>
+<rect x="101" y="21" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<text x="140.0" y="90.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">0<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" /></text>
+<text x="380.0" y="90.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">m<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" /></text>
+<text x="452.0" y="90.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">=<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" /></text>
+<text x="524.0" y="90.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">6<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" /></text>
+<circle cx="530.0" cy="710.0" r="10" fill="black" />
+<path d="M530.0,710.0 L665.0,710.0 L665.0,360.0 L800,360.0" fill="none" stroke="black" stroke-width="3" />
+<path d="M800,360.0 L780,374.0 L780,346.0" fill="black" stroke-width="3" />
+<rect x="800" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="640" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="780" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="920" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1161.0" y="641" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">5</text>
+<text x="840.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<text x="920.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">c</text>
+<text x="1000.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="1080.0" y="710.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">n</text>
+<rect x="1161.0" y="781" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">8</text>
+<text x="840.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">'</text>
+<text x="920.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">s</text>
+<text x="1000.0" y="850.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="1041" y="781" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1161.0" y="921" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">3</text>
+<text x="840.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<text x="920.0" y="990.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">i</text>
+<rect x="961" y="921" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1041" y="921" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<circle cx="530.0" cy="850.0" r="10" fill="black" />
+<path d="M530.0,850.0 L665.0,850.0 L665.0,850.0 L800,850.0" fill="none" stroke="black" stroke-width="3" />
+<path d="M800,850.0 L780,864.0 L780,836.0" fill="black" stroke-width="3" />
+<rect x="800" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="800" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="880" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="960" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1040" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1160.0" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="1130" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="1270" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1280.0" y="1410" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1161.0" y="1131" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="1200.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">0</text>
+<text x="840.0" y="1200.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="920.0" y="1200.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<text x="1000.0" y="1200.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">l</text>
+<text x="1080.0" y="1200.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<rect x="1161.0" y="1271" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="1340.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">4</text>
+<text x="840.0" y="1340.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">h</text>
+<text x="920.0" y="1340.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="1000.0" y="1340.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">p</text>
+<text x="1080.0" y="1340.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">p</text>
+<rect x="1161.0" y="1411" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1200.0" y="1480.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">B</text>
+<text x="840.0" y="1480.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">a</text>
+<text x="920.0" y="1480.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">l</text>
+<rect x="961" y="1411" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1041" y="1411" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="801" y="1131" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<rect x="881" y="1131" width="78" height="138" fill="blue" fill-opacity="0.5" stroke="none">
+<animate attributeName="opacity" dur="5.0s" values="0;0;1;1;0;0" keyTimes="0;0.6;0.66;1;1;1" repeatCount="indefinite" fill="freeze" />
+</rect>
+<circle cx="530.0" cy="990.0" r="10" fill="black" />
+<path d="M530.0,990.0 L665.0,990.0 L665.0,1340.0 L800,1340.0" fill="none" stroke="black" stroke-width="3" />
+<path d="M800,1340.0 L780,1354.0 L780,1326.0" fill="black" stroke-width="3" />
+<rect x="1590" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1670" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1750" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1830" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1590" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1670" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1750" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1830" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1590" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1670" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1750" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1830" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1950.0" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1950.0" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1950.0" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="2070.0" y="10" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="2070.0" y="150" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="2070.0" y="290" width="80" height="140" fill="none" stroke="black" stroke-width="1" />
+<rect x="1951.0" y="11" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1990.0" y="80.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">2</text>
+<text x="1630.0" y="80.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">y</text>
+<text x="1710.0" y="80.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">o</text>
+<text x="1790.0" y="80.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">u</text>
+<text x="1870.0" y="80.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">?</text>
+<rect x="1951.0" y="151" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1990.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">C</text>
+<text x="1630.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">t</text>
+<text x="1710.0" y="220.0" font-size="91.0" text-anchor="middle" dominant-baseline="central">h</text>
+<rect x="1751" y="151" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1831" y="151" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1951.0" y="291" width="78" height="138" fill="red" fill-opacity="0.5" stroke="none" />
+<text x="1990.0" y="360.0" font-size="91.0" text-anchor="middle" dominant-baseline="central"> </text>
+<rect x="1591" y="291" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1671" y="291" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1751" y="291" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<rect x="1831" y="291" width="78" height="138" fill="gray" fill-opacity="0.5" stroke="none" />
+<circle cx="1320.0" cy="220.0" r="10" fill="black" />
+<path d="M1320.0,220.0 L1455.0,220.0 L1455.0,220.0 L1590,220.0" fill="none" stroke="black" stroke-width="3" />
+<path d="M1590,220.0 L1570,234.0 L1570,206.0" fill="black" stroke-width="3" />
+</svg>

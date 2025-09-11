@@ -91,7 +91,6 @@ def main():
     prefill_mesh = jax.make_mesh((1, 2, 2), ("x", "y", "z"), devices=devices, axis_types=(AxisType.Explicit,) * 3)
     cfg = dataclasses.replace(cfg, mesh=decode_mesh, quant_moe=True, quant_cache=True)
     cfg = dataclasses.replace(cfg, use_prefill_attn_kernel=False, use_decode_attn_kernel=False, max_seq_len=2048)
-    cfg.quant_cache = True
 
     weights_formats, decode_cache_formats = gpt_jax.optimal_formats(dataclasses.replace(cfg, mesh=decode_mesh))
     decode_weights = gpt_jax.load_pytree(ckpt_path, weights_formats)
@@ -105,8 +104,9 @@ def main():
     serve_cfg = serving.ServingConfig(decode_steps=32, max_decode_length=64, prefix_chunk_size=64)
     decode_cache = gpt_jax.KVCache.init(random.key(0), cfg, serve_cfg.decode_batch_size, cfg.max_seq_len)
     decode_cache = jax.tree.map(lambda x, sds: jax.device_put(x, sds.sharding), decode_cache, decode_cache_formats)
+    insert_impl = "pallas_tpu" if devices[0].platform.lower() == "tpu" else "xla"
     decode_cache = serving.AttentionWrapper(
-        decode_cache, attn_utils.kvcache_get_sequence, attn_utils.kvcache_insert_sequences
+        decode_cache, attn_utils.kvcache_get_sequence, partial(attn_utils.kvcache_insert_sequences, impl=insert_impl)
     )
     # alternatively use the PagedKVCache for models that have it implemneted already (slower for shorter sequences)
     # decode_cache = gpt_jax.PagedKVCache.init(random.key(0), cfg, serve_cfg.decode_batch_size, 2048, 32)
@@ -117,7 +117,7 @@ def main():
     prefill_cache = gpt_jax.KVCache.init(random.key(0), dataclasses.replace(cfg, mesh=prefill_mesh), serve_cfg.prefill_batch_size, 2048)
     prefill_cache = jax.tree.map(lambda x, sds: jax.device_put(x, sds.sharding), prefill_cache, prefill_cache_formats)
     prefill_cache = serving.AttentionWrapper(
-        prefill_cache, attn_utils.kvcache_get_sequence, attn_utils.kvcache_insert_sequences
+        prefill_cache, attn_utils.kvcache_get_sequence, partial(attn_utils.kvcache_insert_sequences, impl=insert_impl)
     )
 
     sampler = partial(jnp.argmax, axis=-1)

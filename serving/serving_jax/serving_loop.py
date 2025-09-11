@@ -626,9 +626,10 @@ class ServingLoop:
             if "decode" in self.roles and len(batch_cache_updates) > 0:  # batch cache update
                 entries, batch_idxs, lens, next_tokens = map(list, zip(*batch_cache_updates))
                 entries = [entry.result() if hasattr(entry, "result") else entry for entry in entries]  # maybe collect
-                self.decode_work.cache, self.decode_work.curr_tokens = self._update_cache_and_index(
-                    self.decode_work.cache, self.decode_work.curr_tokens, next_tokens, entries, batch_idxs, lens
-                )
+                with set_mesh(self.decode_mesh):
+                    self.decode_work.cache, self.decode_work.curr_tokens = self._update_cache_and_index(
+                        self.decode_work.cache, self.decode_work.curr_tokens, next_tokens, entries, batch_idxs, lens
+                    )
 
         if all(x is None for x in self.decode_work.active_results):
             return  # skip decoding if no decoding tasks are present
@@ -779,10 +780,10 @@ class ServingLoop:
         if "server" in self.roles:
             with self.state_lock:
                 self.pending_requests, requests = [], list(self.pending_requests)
-        serve_cfg, requests = SyncServer.broadcast(
-            "requests", self._it, (dataclasses.asdict(self.serve_cfg), requests), is_source="server" in self.roles
-        )
         with self.state_lock:
+            serve_cfg, requests = SyncServer.broadcast(
+                "requests", self._it, (dataclasses.asdict(self.serve_cfg), requests), is_source="server" in self.roles
+            )
             self.serve_cfg = dataclasses.replace(self.serve_cfg, **serve_cfg)
         for request in requests:
             self.total_requests += 1

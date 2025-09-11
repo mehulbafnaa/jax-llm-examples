@@ -107,7 +107,8 @@ def run_http_server(
 
     @APP.get("/set_generation_length")
     async def set_generation_length(length: int):
-        serve_loop.serve_cfg.max_decode_length = max(length, 32)
+        with serve_loop.state_lock:
+            serve_loop.serve_cfg.max_decode_length = max(length, 32)
         return Response("OK")
 
     @APP.get("/profile")

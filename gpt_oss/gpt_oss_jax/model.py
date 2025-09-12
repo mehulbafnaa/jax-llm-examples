@@ -709,6 +709,7 @@ def attention_kernel(
 
     @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=q_spec, check_vma=False)
     def _f(q, k, v, sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale) -> jax.Array:
+        assert which_platform(cfg) == "tpu", "Currently only TPU supports prefill attention, feel free to send a PR."
         q_seq, kv_seq, kv_heads = q.shape[-2], v.shape[-2], v.shape[-3]
         block_q, block_kv = min(q_seq, 512), min(kv_seq, 1024)
         block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
@@ -723,21 +724,18 @@ def attention_kernel(
         attn_static_fn = lambda q, k, v, segment_ids, sinks: splash.make_splash_mqa_single_device(
             mask=mask, block_sizes=block_sizes
         )(q, k, v, segment_ids, sinks=sinks)
-        attn_static_fn = jax.vmap(attn_static_fn, in_axes=(0, 0, 0, 0, None))  # vmap over batch
-        attn_static_fn = jax.vmap(attn_static_fn, in_axes=(0, 0, 0, None, 0))  # vmap over kv heads
 
         # when the offsets are different (chunked prefill)
         def attn_dynamic_fn(q, k, v, segment_ids, sinks):
+            q_segment_ids, kv_segment_ids = segment_ids.q[None, :], segment_ids.kv[None, :]
             mask = make_attention_mask(
                 q_seq, kv_seq, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal=True,
                 sliding_window=sliding_window
             )
-            mask = jnp.broadcast_to(mask, (mask.shape[0], q.shape[-3], mask.shape[-2], mask.shape[-1]))
+            mask = jnp.broadcast_to(mask, (mask.shape[0], q.shape[-3], mask.shape[-2], mask.shape[-1]))[0, :, :, :]
             attn_fn = lambda q, k, v, segment_ids, sinks, mask: splash.make_splash_mqa_single_device(
                 mask=mask, block_sizes=block_sizes
-            )(q, k, v, segment_ids, sinks=sinks)
-            attn_fn = jax.vmap(attn_fn, in_axes=(0, 0, 0, 0, None, 0))  # vmap over batch
-            attn_fn = jax.vmap(attn_fn, in_axes=(0, 0, 0, None, 0, None))  # vmap over kv heads
+            )(q, k, v, segment_ids, sinks)
             return attn_fn(q, k, v, segment_ids, sinks, mask)
 
         segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
@@ -745,9 +743,16 @@ def attention_kernel(
             k = (k * k_scale[..., None]).astype(jnp.bfloat16)
         if v_scale is not None:
             v = (v * v_scale[..., None]).astype(jnp.bfloat16)
-        return jax.lax.cond(
-            jnp.all(q_offset == kv_offset), attn_static_fn, attn_dynamic_fn, q * scale, k, v, segment_ids, sinks
-        )
+
+        @partial(jax.vmap, in_axes=(0, 0, 0, 0, None))
+        def scanned_attn_fn(q, k, v, segment_ids, sinks):  # workaround to force slicing of sinks for sublanes alignment
+            def map_over_heads(_, el):
+                q, k, v, sinks = el
+                is_static = jnp.all(q_offset == kv_offset)
+                out = jax.lax.cond(is_static, attn_static_fn, attn_dynamic_fn, q * scale, k, v, segment_ids, sinks)
+                return None, out
+            return jax.lax.scan(map_over_heads, None, (q, k, v, sinks))[1]
+        return scanned_attn_fn(q, k, v, segment_ids, sinks)
 
     out = _f(q, k, v, sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale).astype(jnp.bfloat16)
     return jax.lax.reshape(out, q_shape, out_sharding=l2p("batch", "q_heads", "sequence", "head_dim"))
@@ -810,7 +815,7 @@ def attention_block(
     with jax.named_scope("attention"):
         attn_args = (q, k, v, layer.sinks, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths)
         if cfg.use_prefill_attn_kernel and q.shape[-2] != 1:
-            raise NotImplementedError("Needs fixes to splash attention to support sinks.")
+            #raise NotImplementedError("Needs fixes to splash attention to support sinks.")
             attn_out = attention_kernel(*attn_args, cfg=cfg, sliding_window=sliding_window)
         else:
             attn_out = attention(*attn_args, cfg=cfg, sliding_window=sliding_window)

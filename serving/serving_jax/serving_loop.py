@@ -514,7 +514,7 @@ def _make_multistep_decode_fn(decode_fn):
         def body(carry, _):
             curr_tokens, cache = carry
             next_tokens, cache = decode_fn(curr_tokens, decode_weights, cache, cfg)
-            return (next_tokens, cache), next_tokens
+            return (jax.sharding.reshard(next_tokens, jax.typeof(curr_tokens).sharding.spec), cache), next_tokens
 
         (curr_tokens, cache), output_tokens = jax.lax.scan(body, (curr_tokens, cache), length=steps)
         return (curr_tokens, cache), output_tokens[..., 0].T

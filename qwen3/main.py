@@ -54,6 +54,7 @@ if __name__ == "__main__":
     )
     cfg = q3jax.hf_to_jax_config(json.loads((ckpt_path / "config.json").read_text()))
     cfg = dataclasses.replace(cfg, mesh=mesh, quant_attn=quant, quant_moe=quant, quant_mlp=quant, quant_cache=quant)
+    cfg = dataclasses.replace(cfg, use_prefill_attn_kernel=True)
     weights = q3jax.load_pytree(ckpt_path, q3jax.Weights.shardings(cfg))
 
     input = encode_input(
@@ -76,4 +77,5 @@ if __name__ == "__main__":
         tokens = np.array(jnp.concatenate(tokens_list, axis=-1))
     responses = [tokenizer.decode(row) for row in tokens]
     print("Responses:")
-    print(responses)
+    for response in responses:
+        print(f"{response}\n--------------------------------\n")

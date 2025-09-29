@@ -20,7 +20,11 @@ from pprint import pprint
 import jax
 from jax import numpy as jnp
 from jax import random
-from jax.sharding import use_mesh, AxisType, PartitionSpec as P
+from jax.sharding import set_mesh, AxisType, PartitionSpec as P
+try:
+    from jax.sharding import use_mesh as set_mesh  # for jax < 0.7.0
+except ImportError:
+    pass
 import numpy as np
 
 from llama3_jax import model as l3jax
@@ -43,13 +47,14 @@ if __name__ == "__main__":
     #jax.distributed.initialize()  # if you want to run multi-host
     quant = True
 
-    ckpt_path = epath.Path("~/bucket/llama3_jax/DeepSeek-R1-Distill-Llama-3.1-8B-Instruct").expanduser()
+    ckpt_path = epath.Path("~/bucket/llama3_jax_old/DeepSeek-R1-Distill-Llama-3.1-8B-Instruct").expanduser()
     if quant:
         ckpt_path = ckpt_path.parent / f"{ckpt_path.name}-quant"
     tokenizer = l3jax.load_tokenizer(ckpt_path / "tokenizer.json", ckpt_path / "tokenizer_config.json")
 
     mesh = jax.make_mesh(
-        (1, 8, jax.device_count() // 8), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
+        #(1, 8, jax.device_count() // 8), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
+        (1, 4, jax.device_count() // 4), ("x", "y", "z"), devices=jax.devices(), axis_types=(AxisType.Explicit,) * 3
     )
     cfg = l3jax.llama_to_jax_config(json.loads((ckpt_path / "config.json").read_text()))
     cfg = dataclasses.replace(cfg, mesh=mesh, quant_layer=quant, quant_cache=quant)
@@ -65,10 +70,10 @@ if __name__ == "__main__":
         model_name=ckpt_path.name,
     )
 
-    with use_mesh(cfg.mesh):
-        zero_cache = l3jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
+    with set_mesh(cfg.mesh):
+        zero_cache = l3jax.KVCache.init(random.key(1), cfg, input.shape[0])
         next_tokens, logits, cache = l3jax.prefill(input, weights, zero_cache, cfg)
-        curr_tokens = next_tokens.at[:, cache.length - 1 : cache.length].get(out_sharding=P(None, None))
+        curr_tokens = next_tokens.at[:, cache.iter - 1 : cache.iter].get(out_sharding=P(None, None))
         tokens_list = []
         for _ in range(16):
             tokens_list.append(curr_tokens)

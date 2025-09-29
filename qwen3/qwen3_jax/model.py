@@ -21,7 +21,6 @@ from pathlib import Path
 import math
 from functools import partial
 from typing import Callable, Any
-from inspect import signature
 
 import jax
 import jax.numpy as jnp
@@ -30,11 +29,7 @@ from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
-from jax.sharding import PartitionSpec as P
-try:
-    from jax.experimental.shard import auto_axes as _auto_axes, reshard
-except ModuleNotFoundError:
-    from jax.sharding import auto_axes as _auto_axes, reshard
+from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from etils import epath
 
 from . import ragged_attention
@@ -99,11 +94,6 @@ class ShardingRules:
     # vocab
     vocab_in: AxisName = None
     vocab_out: AxisName = TENSOR_AXIS_NAME
-
-
-def auto_axes(x, out_sharding):  # TOOD(rdyro): remove once in JAX >= 0.7.0
-    argname = "out_sharding" if "out_sharding" in signature(_auto_axes).parameters else "out_shardings"
-    return _auto_axes(x, **{argname: out_sharding})
 
 
 def logical_to_physical(logical: Axes, rules: ShardingRules) -> jax.sharding.PartitionSpec:
@@ -696,7 +686,19 @@ def attention(
     return qkv.reshape((b, qh, t, d))
 
 
-def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths, cfg: Config):
+def attention_kernel(
+    q: jax.Array,
+    k: jax.Array | tuple[jax.Array, jax.Array],
+    v: jax.Array | tuple[jax.Array, jax.Array],
+    q_segment_ids: jax.Array,
+    kv_segment_ids: jax.Array,
+    q_offset: jax.Array,
+    kv_offset: jax.Array,
+    starts: jax.Array,
+    lengths: jax.Array,
+    *,
+    cfg: Config,
+) -> jax.Array:
     """Flash attention kernel!"""
 
     # On TPUv3, pallas seems to only work with float32.
@@ -710,60 +712,61 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset
     scale = q.shape[-1] ** -0.5
 
     l2p = lambda *logical: logical_to_physical(logical, cfg.rules)
-
-    kv_repeats = q.shape[-3] // k.shape[-3]
-    q_spec = P(
-        *(l2p("batch", "kv_heads") + tuple(set(*l2p("q_heads")) - set(*l2p("kv_heads"))) + l2p("sequence", "head_dim"))
-    )
-    q_shape__ = q.shape
+    q_shape, kv_repeats = q.shape, q.shape[-3] // k.shape[-3]
+    kv_repeats_spec = tuple(set(*l2p("q_heads")) - set(*l2p("kv_heads")))
+    kv_repeats_spec = kv_repeats_spec if len(kv_repeats_spec) > 0 else (None,)
+    q_spec = P(*(l2p("batch", "kv_heads") + kv_repeats_spec + l2p("sequence", "head_dim")))
     q = jax.lax.reshape(q, (q.shape[:-3] + (k.shape[-3], kv_repeats, q.shape[-2], q.shape[-1])), out_sharding=q_spec)
 
     # shard_map
     in_specs = (
-        q_spec,
-        l2p("batch", "kv_heads", "sequence", "head_dim"),
-        l2p("batch", "kv_heads", "sequence", "head_dim"),
-        l2p("batch", "sequence"),
-        l2p("batch", "sequence"),
-        l2p("batch"),
-        l2p("batch"),
+        q_spec,  # q
+        l2p("batch", "kv_heads", "sequence", "head_dim"),  # k
+        l2p("batch", "kv_heads", "sequence", "head_dim"),  # v
+        l2p("batch", "sequence"),  # q_segment_ids
+        l2p("batch", "sequence"),  # kv_segment_ids
+        l2p("batch"),  # q_offset
+        l2p("batch"),  # kv_offset
     )
-    in_specs += (None if k_scale is None else l2p("batch", "kv_heads", "sequence"),)
-    in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)
-    out_specs = q_spec
+    in_specs += (None if k_scale is None else l2p("batch", "kv_heads", "sequence"),)  # k_scales
+    in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)  # v_scales
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
-    def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
-        q_org_shape = q.shape
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=q_spec, check_vma=False)
+    def _f(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale) -> jax.Array:
+        assert which_platform(cfg) == "tpu", "Currently only TPU supports prefill attention, feel free to send a PR."
+        q_seq, kv_seq, kv_heads = q.shape[-2], v.shape[-2], v.shape[-3]
+        block_q, block_kv = min(q_seq, 512), min(kv_seq, 1024)
+        block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
 
-        if q.shape[-2] != 1:
-            mask = mask_lib.MultiHeadMask([mask_lib.CausalMask((q.shape[-2], k.shape[-2])) for _ in range(q.shape[-3])])
-            block_q, block_kv = min(q.shape[-2], 512), min(k.shape[-2], 1024)
-            block_sizes = splash.BlockSizes(block_q=block_q, block_kv=block_kv, block_kv_compute=block_kv)
+        # for prefill with an empty cache
+        mask = mask_lib.MultiHeadMask([mask_lib.CausalMask((q_seq, kv_seq)) for _ in range(q.shape[-3])])
+        def attn_static_fn(q, k, v, segment_ids):
             attn_fn = splash.make_splash_mqa_single_device(mask=mask, block_sizes=block_sizes)
-            attn_fn = jax.vmap(jax.vmap(attn_fn, in_axes=(0, 0, 0, None)), in_axes=(0, 0, 0, 0))
+            attn_fn = jax.vmap(attn_fn, (0, 0, 0, None)) # map over kv heads for mqa
+            attn_fn = jax.vmap(attn_fn, (0, 0, 0, 0))  # map over batch
+            return attn_fn(q, k, v, segment_ids)
 
-            segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
-            if k_scale is not None:
-                k = (k * k_scale[..., None]).astype(jnp.bfloat16)
-            if v_scale is not None:
-                v = (v * v_scale[..., None]).astype(jnp.bfloat16)
-            ret = attn_fn(q * scale, k, v, segment_ids)
-        else:
-            assert q.shape[-2] == 1, "This is a decode kernel, q.shape[-2] must be 1"
-            q = q[..., 0, :]
-            in_axes = (1, 1, 1, None, None)
-            in_axes += ((None if k_scale is None else 1),)
-            in_axes += ((None if v_scale is None else 1),)
-            hyperparams = dict(scale=scale, block_kv=512, block_bs=32)
-            ret = jax.vmap(partial(ragged_attention.ragged_decode_fwd, **hyperparams), in_axes=in_axes, out_axes=1)(
-                q, k, v, starts, lengths, k_scale, v_scale
-            )
-        return ret.reshape(q_org_shape)
+        # when the offsets are different (chunked prefill)
+        def attn_dynamic_fn(q, k, v, segment_ids):  # when the offsets are different (chunked prefill)
+            q_segment_ids, kv_segment_ids = segment_ids.q, segment_ids.kv
+            mask = make_attention_mask(q_seq, kv_seq, q_segment_ids, kv_segment_ids, q_offset, kv_offset, causal=True)
+            attn_fn = lambda q, k, v, segment_ids, mask: splash.make_splash_mqa_single_device(mask=mask, block_sizes=block_sizes)(q, k, v, segment_ids)
+            attn_fn = jax.vmap(attn_fn, (0, 0, 0, None, None)) # map over kv heads for mqa
+            attn_fn = jax.vmap(attn_fn, (0, 0, 0, 0, 0))  # map over batch
+            return attn_fn(q, k, v, segment_ids, mask)
 
-    lengths = jnp.broadcast_to(lengths, starts.shape)
-    ret = _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale).astype(jnp.bfloat16)
-    return jax.lax.reshape(ret, q_shape__, out_sharding=l2p("batch", "q_heads", "sequence", "head_dim"))
+        segment_ids = splash.SegmentIds(q=q_segment_ids, kv=kv_segment_ids)
+        if k_scale is not None:
+            k = (k * k_scale[..., None]).astype(jnp.bfloat16)
+        if v_scale is not None:
+            v = (v * v_scale[..., None]).astype(jnp.bfloat16)
+        #return attn_dynamic_fn(q, k, v, segment_ids)
+        return jax.lax.cond(
+            jnp.all(q_offset == kv_offset), attn_static_fn, attn_dynamic_fn, q * scale, k, v, segment_ids
+        )
+
+    out = _f(q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, k_scale, v_scale).astype(jnp.bfloat16)
+    return jax.lax.reshape(out, q_shape, out_sharding=l2p("batch", "q_heads", "sequence", "head_dim"))
 
 
 def rms_norm(x: jax.Array, gamma: jax.Array | None, eps: jax.Array | float) -> jax.Array:
@@ -822,7 +825,7 @@ def attention_block(
     # Compute attention
     with jax.named_scope("attention"):
         attn_args = (q, k, v, q_segment_ids, kv_segment_ids, q_offset, kv_offset, starts, lengths)
-        if (cfg.use_prefill_attn_kernel and q.shape[-2] != 1) or (cfg.use_decode_attn_kernel and q.shape[-2] == 1):
+        if cfg.use_prefill_attn_kernel and q.shape[-2] != 1:
             attn_out = attention_kernel(*attn_args, cfg=cfg)
         else:
             attn_out = attention(*attn_args, cfg)

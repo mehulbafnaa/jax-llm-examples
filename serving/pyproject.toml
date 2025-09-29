@@ -1,5 +1,5 @@
 [project]
-name = "llama3_jax"
+name = "serving_jax"
 version = "0.1.0"
 description = ""
 authors = [
@@ -11,31 +11,36 @@ license = { text = "Apache-2.0" }
 
 dependencies = [
     "jax",
-    "torch",
-    #"transformers",  # for the model config and the tokenizer
     "tqdm",
     "numpy",
-    "flatbuffers",
-    "tensorstore",
-    #"orbax-checkpoint",
-    #"datasets",
     "gcsfs",
     "etils",
-    "importlib_resources",
-    "absl-py",
 ]
 
-# we don't need CUDA torch
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cpu"
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W291",  # trailing whitespace
+    "F821",  # undefined variables
+]
+ignore = [
+    "E731",  # lambdas expression instead of def
+    "E741",  # allow 'l' as a variable name
+    "E402",  # allow module imports not at top of file
+    "F841",  # allow unused variables
+    "E501",  # ignore line-too-long
+]
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["llama3_jax"]
+packages = ["serving_jax"]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["pyproject.toml"] }

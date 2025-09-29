@@ -20,8 +20,7 @@ from jax import numpy as jnp
 from jax import random
 from jax.sharding import PartitionSpec as P, AxisType, set_mesh
 try:
-    from jax.sharding import use_mesh
-    set_mesh = use_mesh
+    from jax.sharding import use_mesh as set_mesh  # for jax < 0.7.0
 except ImportError:
     pass
 
@@ -59,7 +58,7 @@ class TestModel(parameterized.TestCase):
     @parameterized.product(quant=[False, True])
     def test_cache_init(self, quant):
         cfg = dataclasses.replace(self.small_cfg, quant_cache=quant)
-        cache = l3jax.KVCache.init(random.key(0), cfg, 2, cfg.max_seq_len)
+        cache = l3jax.KVCache.init(random.key(0), cfg, 2)
         del cache
 
     @parameterized.product(quant_weights=[False, True], quant_cache=[True, False])
@@ -67,7 +66,7 @@ class TestModel(parameterized.TestCase):
         cfg = dataclasses.replace(self.small_cfg, quant_layer=quant_weights, quant_cache=quant_cache)
         tokens = jnp.ones((1, 32), dtype=jnp.int32)
         weights = l3jax.Weights.init(random.key(0), cfg)
-        cache = l3jax.KVCache.init(random.key(0), cfg, tokens.shape[0], cfg.max_seq_len)
+        cache = l3jax.KVCache.init(random.key(0), cfg, tokens.shape[0])
         with set_mesh(cfg.mesh):
             max_tokens, _, cache = l3jax.prefill(tokens, weights, cache, cfg)
         next_tokens = max_tokens[:, :-1]

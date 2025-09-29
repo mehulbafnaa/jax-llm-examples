@@ -20,13 +20,6 @@ import jax
 from jax import numpy as jnp
 from jax import random
 from jax.sharding import set_mesh, AxisType, PartitionSpec as P
-
-try:
-    from jax.sharding import use_mesh
-
-    set_mesh = use_mesh
-except ImportError:
-    pass
 import numpy as np
 
 from transformers import AutoTokenizer
@@ -62,6 +55,7 @@ if __name__ == "__main__":
     )
     cfg = gpt_jax.hf_to_jax_config(json.loads((ckpt_path / "config.json").read_text()))
     cfg = dataclasses.replace(cfg, mesh=mesh, quant_moe=quant, quant_cache=quant, max_seq_len=2048)
+    cfg = dataclasses.replace(cfg, use_prefill_attn_kernel=True)
 
     input = encode_input(
         tokenizer,
@@ -72,12 +66,13 @@ if __name__ == "__main__":
         ]
         + ["Do you like ice cream, be extremely precise"] * (4 - 3),
     )
-    weights = gpt_jax.load_pytree(ckpt_path, gpt_jax.Weights.shardings(cfg))
-    weights = jax.device_put(weights, gpt_jax.compute_optimal_weights_layouts(weights, cfg))
+    weights_formats, cache_formats = gpt_jax.optimal_formats(cfg)
+    weights = gpt_jax.load_pytree(ckpt_path, weights_formats)
 
     profile = True
     with set_mesh(cfg.mesh):
         zero_cache = gpt_jax.KVCache.init(random.key(1), cfg, input.shape[0], cfg.max_seq_len)
+        zero_cache = jax.tree.map(lambda x, sds: jax.device_put(x, sds.sharding), zero_cache, cache_formats)
         next_tokens, logits, cache = gpt_jax.prefill(input, weights, zero_cache, cfg)
         curr_tokens = next_tokens.at[:, cache.iter - 1 : cache.iter].get(out_sharding=P(None, None))
         tokens_list = []

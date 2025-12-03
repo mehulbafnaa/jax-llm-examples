@@ -77,6 +77,26 @@ class TestModel(parameterized.TestCase):
         weights = q3jax.Weights.init(random.key(0), cfg)
         del weights
 
+    @parameterized.product(quant=[False, True])
+    def test_init_hashing(self, quant):
+        cfg = dataclasses.replace(self.small_moe_cfg, quant_cache=quant)
+        hash_fn = lambda x: hash(tuple(jax.tree.leaves(x, is_leaf=q3jax.is_param)))
+        with self.subTest("Testing weights abstract and shardings hashing"):
+            abstract = q3jax.Weights.abstract(cfg)
+            abstract2 = q3jax.Weights.abstract(cfg)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = q3jax.Weights.shardings(cfg)
+            shardings2 = q3jax.Weights.shardings(cfg)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
+        with self.subTest("Testing kv-cache abstract and shardings hashing"):
+            abstract = q3jax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            abstract2 = q3jax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = q3jax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            shardings2 = q3jax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
     @parameterized.product(moe=[True, False], quant=[False, True])
     def test_cache_init(self, moe, quant):
         cfg = self.small_moe_cfg if moe else self.small_dense_cfg

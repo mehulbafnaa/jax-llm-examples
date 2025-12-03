@@ -85,6 +85,26 @@ class TestModel(parameterized.TestCase):
         del weights
 
     @parameterized.product(quant=[False, True])
+    def test_init_hashing(self, quant):
+        cfg = dataclasses.replace(self.small_moe_cfg, quant_cache=quant)
+        hash_fn = lambda x: hash(tuple(jax.tree.leaves(x, is_leaf=gpt_jax.is_param)))
+        with self.subTest("Testing weights abstract and shardings hashing"):
+            abstract = gpt_jax.Weights.abstract(cfg)
+            abstract2 = gpt_jax.Weights.abstract(cfg)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = gpt_jax.Weights.shardings(cfg)
+            shardings2 = gpt_jax.Weights.shardings(cfg)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
+        with self.subTest("Testing kv-cache abstract and shardings hashing"):
+            abstract = gpt_jax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            abstract2 = gpt_jax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = gpt_jax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            shardings2 = gpt_jax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
+    @parameterized.product(quant=[False, True])
     def test_cache_init(self, quant):
         cfg = self.small_moe_cfg
         cache = gpt_jax.KVCache.init(random.key(0), cfg, 2, cfg.max_seq_len)

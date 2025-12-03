@@ -19,7 +19,7 @@ import os
 import json
 from pathlib import Path
 import math
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable, Any
 
 import jax
@@ -226,6 +226,8 @@ _length_minus_right_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
+_he_normal = lru_cache(jax.nn.initializers.he_normal)
+_const_init = lru_cache(jax.nn.initializers.constant)
 
 
 @partial(jax.jit, static_argnames=("abstract", "shardings"))
@@ -350,19 +352,28 @@ class AttentionLayer(_Init):
     ########################################################################################################################
     @classmethod
     def abstract(cls, cfg: Config) -> "AttentionLayer":
-        _init = lambda *out_axes: jax.nn.initializers.he_normal(in_axis=0, out_axis=out_axes)
+        _init = _he_normal
         layer = AttentionLayer(
             q=ArrayInfo(
-                (cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.q_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "q_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             k=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "kv_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             v=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "kv_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             o=ArrayInfo(
-                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init(1, 2)
+                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init(0, (1, 2))
             ),
             q_gamma=ArrayInfo((cfg.head_dim,), cfg.dtype, ("head_dim",), jax.nn.initializers.ones),
             k_gamma=ArrayInfo((cfg.head_dim,), cfg.dtype, ("head_dim",), jax.nn.initializers.ones),
@@ -392,11 +403,11 @@ class MLPLayer(_Init):
     ########################################################################################################################
     @classmethod
     def abstract(cls, cfg: Config) -> "MLPLayer":
-        _init = lambda *out_axes: jax.nn.initializers.he_normal(in_axis=0, out_axis=out_axes)
+        _init = _he_normal
         layer = MLPLayer(
-            w_gate=ArrayInfo((cfg.embed, cfg.mlp_ffw_size), cfg.dtype, ("mlp_up_embed", "mlp_up_ffw"), _init(1)),
-            w_up=ArrayInfo((cfg.embed, cfg.mlp_ffw_size), cfg.dtype, ("mlp_up_embed", "mlp_up_ffw"), _init(1)),
-            w_down=ArrayInfo((cfg.mlp_ffw_size, cfg.embed), cfg.dtype, ("mlp_down_ffw", "mlp_down_embed"), _init(1)),
+            w_gate=ArrayInfo((cfg.embed, cfg.mlp_ffw_size), cfg.dtype, ("mlp_up_embed", "mlp_up_ffw"), _init(0, 1)),
+            w_up=ArrayInfo((cfg.embed, cfg.mlp_ffw_size), cfg.dtype, ("mlp_up_embed", "mlp_up_ffw"), _init(0, 1)),
+            w_down=ArrayInfo((cfg.mlp_ffw_size, cfg.embed), cfg.dtype, ("mlp_down_ffw", "mlp_down_embed"), _init(0, 1)),
         )
         layer = cls.quantize(layer, cfg)
         return layer
@@ -425,8 +436,8 @@ class MoELayer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config):
-        _einit = jax.nn.initializers.he_normal(in_axis=0, out_axis=(1, 2))
-        _sinit = jax.nn.initializers.he_normal(in_axis=0, out_axis=1)
+        _einit = _he_normal(in_axis=0, out_axis=(1, 2))
+        _sinit = _he_normal(in_axis=0, out_axis=1)
         dtype = cfg.dtype
         layer = MoELayer(
             w_router=ArrayInfo((cfg.embed, cfg.moe_num_experts), cfg.moe_gate_dtype, ("moe_e_up_embed", None), _sinit),
@@ -479,8 +490,8 @@ class Layer(_Init):
         layer = Layer(
             ffw=MoELayer.abstract(cfg) if is_moe else MLPLayer.abstract(cfg),
             attn=AttentionLayer.abstract(cfg),
-            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
-            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), _const_init(1.0)),
+            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), _const_init(1.0)),
         )
         # layer = cls.quantize(layer, cfg)  # abstract already quantized
         return layer
@@ -502,11 +513,11 @@ class Weights(_Init):
     @classmethod
     def abstract(cls, cfg: Config):
         layers = [Layer.abstract(cfg, layer_idx) for layer_idx in range(cfg.num_layers)]
-        init = lambda in_axis, out_axis: jax.nn.initializers.he_normal(in_axis=in_axis, out_axis=out_axis)
+        init = _he_normal
         return Weights(
             layers=layers,
             embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init(0, 1)),
-            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), _const_init(1.0)),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init(1, 0)),
         )
 
@@ -531,7 +542,7 @@ class KVCache(_Init):
         cache = KVCache(
             k=[val_info for _ in range(cfg.num_layers)],
             v=[val_info for _ in range(cfg.num_layers)],
-            iter=ArrayInfo((), jnp.int32, (),  jax.nn.initializers.constant(-1)),
+            iter=ArrayInfo((), jnp.int32, (),  _const_init(-1)),
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), jax.nn.initializers.zeros),
             size=max_seq_len,
         )

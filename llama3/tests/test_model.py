@@ -61,6 +61,26 @@ class TestModel(parameterized.TestCase):
         cache = l3jax.KVCache.init(random.key(0), cfg, 2)
         del cache
 
+    @parameterized.product(quant=[False, True])
+    def test_init_hashing(self, quant):
+        cfg = dataclasses.replace(self.small_cfg, quant_cache=quant)
+        hash_fn = lambda x: hash(tuple(jax.tree.leaves(x, is_leaf=l3jax.is_param)))
+        with self.subTest("Testing weights abstract and shardings hashing"):
+            abstract = l3jax.Weights.abstract(cfg)
+            abstract2 = l3jax.Weights.abstract(cfg)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = l3jax.Weights.shardings(cfg)
+            shardings2 = l3jax.Weights.shardings(cfg)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
+        with self.subTest("Testing kv-cache abstract and shardings hashing"):
+            abstract = l3jax.KVCache.abstract(cfg, 2)
+            abstract2 = l3jax.KVCache.abstract(cfg, 2)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = l3jax.KVCache.shardings(cfg, 2)
+            shardings2 = l3jax.KVCache.shardings(cfg, 2)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
     @parameterized.product(quant_weights=[False, True], quant_cache=[True, False])
     def test_prefill_decode(self, quant_weights, quant_cache):
         cfg = dataclasses.replace(self.small_cfg, quant_layer=quant_weights, quant_cache=quant_cache)

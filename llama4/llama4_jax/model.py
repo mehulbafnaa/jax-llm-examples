@@ -28,7 +28,6 @@ from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from etils import epath
 
@@ -839,7 +838,7 @@ def attention_kernel(
     in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
         q_org_shape = q.shape
         #kv_repeats = q.shape[-3] // k.shape[-3]
@@ -1044,7 +1043,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
     assert cfg.moe_num_experts % expert_count == 0
     expert_size = cfg.moe_num_experts // expert_count
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_vma=False)
     def _expert_fn(x, we_gate, we_up, we_down, topk_weights, topk_idx):
         (b, s, d), e = x.shape, cfg.moe_experts_per_tok
         expert_idx = jax.lax.axis_index(expert_axname) if expert_axname is not None else 0

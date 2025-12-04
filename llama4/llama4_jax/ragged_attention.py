@@ -8,7 +8,6 @@ from jax import numpy as jnp
 from jax import random
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, NamedSharding
 import numpy as np
 
@@ -330,7 +329,7 @@ def test_main(interpret=False):
         in_specs += (P(None, "x", None, None) if qk_prev is not None else None,)
         out_specs = qkv_spec
 
-        @partial(shard_map, mesh=mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+        @partial(jax.shard_map, mesh=mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
         def _fn(q, k, v, starts, lengths, k_scale, v_scale, qk_prev):
             in_axes = (1, 1, 1, None, None)
             in_axes += (1 if k_scale is not None else None,)

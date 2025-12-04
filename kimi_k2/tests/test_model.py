@@ -44,7 +44,9 @@ SMALL_CFG = k2jax.Config(
 
 class TestModel(parameterized.TestCase):
     def setUp(self):
-        self.mesh = jax.make_mesh((1, len(jax.devices()), 1), P("x", "y", "z"))
+        self.mesh = jax.make_mesh(
+            (1, len(jax.devices()), 1), P("x", "y", "z"), axis_types=(jax.sharding.AxisType.Auto,) * 3
+        )
         self.small_cfg = dataclasses.replace(SMALL_CFG, mesh=self.mesh)
 
     @parameterized.product(quant=[False, True])

@@ -29,7 +29,6 @@ from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from jax.experimental.array_serialization import pytree_serialization as ser
 from jax.experimental.pallas.ops.gpu import paged_attention
@@ -766,7 +765,7 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
     in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
         q_org_shape = q.shape
 
@@ -832,7 +831,7 @@ def paged_attention_kernel(q, k, v, block_tables, lengths, cfg: Config):
     )
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, k_scale, v, v_scale, block_tables, lengths):
         # q in [batch_size, kv_heads_local, kv_repeats, 1, head_dim]
         if k_scale is not None:

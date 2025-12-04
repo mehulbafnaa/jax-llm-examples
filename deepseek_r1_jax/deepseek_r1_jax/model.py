@@ -31,7 +31,6 @@ from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.shard_map import shard_map
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from .decode_ragged_dot import decode_ragged_dot
@@ -819,7 +818,7 @@ def attention_kernel(
     )
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q_nope, q_pe, k_nope, k_pe, v, q_segment_ids, kv_segment_ids, k_nope_scale, k_pe_scale, v_scale):
         q_seq, kv_seq, heads = q_nope.shape[-2], v.shape[-2], v.shape[-3]
         block_q, block_kv = min(q_seq, 512), min(kv_seq, 1024)
@@ -1035,7 +1034,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
     assert cfg.n_routed_experts % expert_count == 0
     expert_size = cfg.n_routed_experts // expert_count
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_vma=False)
     def _expert_fn(x, we_gate, we_up, we_down, topk_weights, topk_idx):
         (b, s, d), e = x.shape, cfg.num_experts_per_tok
         expert_idx = jax.lax.axis_index(expert_axname) if expert_axname is not None else 0

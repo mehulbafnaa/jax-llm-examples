@@ -398,7 +398,7 @@ class Weights(_Init):
         init = _he_normal
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init(0, 1)),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, (None, "vocab_in"), init(0, 1)),
             gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init(1, 0)),
         )

@@ -555,7 +555,7 @@ class Weights(_Init):
         return Weights(
             layers=layers,
             embedding=ArrayInfo(
-                (cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_out"), _he_normal(in_axis=0, out_axis=1),
+                (cfg.vocab_size, cfg.embed), cfg.dtype, (None, "vocab_in"), _he_normal(in_axis=0, out_axis=1),
             ),
             gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), _ones_init),
             lm_head=ArrayInfo(

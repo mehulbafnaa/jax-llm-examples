@@ -133,7 +133,6 @@ class Config:
     head_dim: int
     vocab_size: int
     max_seq_len: int
-    tie_embed: bool
     # Attention
     causal: bool
     # MoE
@@ -145,6 +144,8 @@ class Config:
     # MLP
     mlp_ffw_size: int = -1
     mlp_layer_idxs: list[int] = dataclasses.field(default_factory=list)
+    # embedding tying
+    tie_embed: bool = False
     # kernel config
     use_prefill_attn_kernel: bool = False
     use_decode_attn_kernel: bool = False

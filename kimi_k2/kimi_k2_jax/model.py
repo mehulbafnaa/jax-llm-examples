@@ -17,7 +17,7 @@
 import dataclasses
 import math
 from dataclasses import field
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable
 import tempfile
 from etils import epath
@@ -31,7 +31,6 @@ from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.shard_map import shard_map
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from .decode_ragged_dot import decode_ragged_dot
@@ -212,6 +211,8 @@ is_type = lambda x, cls: (type(x).__name__ == cls.__name__) and (type(x).__modul
 is_param = lambda x: is_type(x, ArrayInfo)
 _count_left_padding = lambda ids, pad_id=PAD_ID: jnp.sum(jnp.cumsum(ids != pad_id, axis=-1) == 0, axis=-1)
 _length_minus_right_padding = lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1)
+_he_normal = lru_cache(jax.nn.initializers.he_normal)
+_ones_init = jax.nn.initializers.ones
 
 
 @partial(jax_pytree_struct, meta_fields=("shape", "dtype", "logical_axes", "initializer"))
@@ -343,7 +344,7 @@ class MLPLayer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config):
-        _init = jax.nn.initializers.he_normal(in_axis=0, out_axis=1)
+        _init = _he_normal(in_axis=0, out_axis=1)
         dtype = cfg.dtype
         layer = MLPLayer(
             w_gate=ArrayInfo((cfg.embed, cfg.ffw_size), dtype, ("mlp_up_embed", "mlp_up_ffw"), _init),
@@ -382,15 +383,15 @@ class MoELayer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config):
-        _einit = jax.nn.initializers.he_normal(in_axis=0, out_axis=(1, 2))
-        _sinit = jax.nn.initializers.he_normal(in_axis=0, out_axis=1)
+        _einit = _he_normal(in_axis=0, out_axis=(1, 2))
+        _sinit = _he_normal(in_axis=0, out_axis=1)
         dtype = cfg.dtype
         layer = MoELayer(
             w_router=ArrayInfo(
                 (cfg.embed, cfg.n_routed_experts), cfg.moe_gate_dtype, ("moe_e_up_embed", None), _sinit
             ),
             b_router=ArrayInfo(
-                (cfg.n_routed_experts,), cfg.moe_gate_dtype, (None,), jax.nn.initializers.constant(0.0)
+                (cfg.n_routed_experts,), cfg.moe_gate_dtype, (None,), jax.nn.initializers.zeros,
             ),
             we_gate=ArrayInfo(
                 (cfg.n_routed_experts, cfg.embed, cfg.moe_ffw_size), dtype,
@@ -456,34 +457,33 @@ class AttentionLayer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config):
-        _init = lambda *out_ax: jax.nn.initializers.he_normal(in_axis=0, out_axis=out_ax)
+        _init = _he_normal
         dtype = cfg.dtype
-        _ones_init = jax.nn.initializers.constant(1.0)
         q_head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim
         layer = AttentionLayer(
-            q_a=ArrayInfo((cfg.embed, cfg.q_lora_rank), dtype, ("qkv_embed", "q_lora"), _init(1)),
+            q_a=ArrayInfo((cfg.embed, cfg.q_lora_rank), dtype, ("qkv_embed", "q_lora"), _init(0, 1)),
             q_gamma=ArrayInfo((cfg.q_lora_rank,), dtype, ("q_lora",), _ones_init),
             q_b=ArrayInfo(
                 (cfg.q_lora_rank, cfg.num_heads, q_head_dim), dtype,
                 ("q_lora", "qkv_heads", "head_dim"),
                 _init(1, 2),
             ),
-            kv_a=ArrayInfo((cfg.embed, cfg.kv_lora_rank), dtype, ("qkv_embed", "kv_lora"), _init(1)),
-            k_pe=ArrayInfo((cfg.embed, cfg.qk_rope_head_dim), dtype, ("qkv_embed", "head_dim"), _init(1)),
+            kv_a=ArrayInfo((cfg.embed, cfg.kv_lora_rank), dtype, ("qkv_embed", "kv_lora"), _init(0, 1)),
+            k_pe=ArrayInfo((cfg.embed, cfg.qk_rope_head_dim), dtype, ("qkv_embed", "head_dim"), _init(0, 1)),
             kv_gamma=ArrayInfo((cfg.kv_lora_rank,), dtype, ("kv_lora",), _ones_init),
             k_b=ArrayInfo(
                 (cfg.kv_lora_rank, cfg.num_heads, cfg.qk_nope_head_dim), dtype,
                 ("kv_lora", "qkv_heads", "head_dim"),
-                _init(1, 2),
+                _init(0, (1, 2)),
             ),
             v_b=ArrayInfo(
                 (cfg.kv_lora_rank, cfg.num_heads, cfg.v_head_dim),
                 dtype,
                 ("kv_lora", "qkv_heads", "head_dim"),
-                _init(1, 2),
+                _init(0, (1, 2)),
             ),
             o=ArrayInfo(
-                (cfg.num_heads, cfg.v_head_dim, cfg.embed), dtype, ("o_heads", "head_dim", "o_embed"), _init(1, 2)
+                (cfg.num_heads, cfg.v_head_dim, cfg.embed), dtype, ("o_heads", "head_dim", "o_embed"), _init(0, (1, 2))
             ),
         )
         layer = cls.quantize(layer, cfg)
@@ -515,7 +515,7 @@ class Layer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config, use_moe: bool = True) -> "Layer":
-        _init = jax.nn.initializers.constant(1.0)
+        _init = jax.nn.initializers.ones
         dtype = cfg.dtype
         return Layer(
             mlp=MoELayer.abstract(cfg) if use_moe else MLPLayer.abstract(cfg),
@@ -544,22 +544,13 @@ class Weights(_Init):
         return Weights(
             layers=layers,
             embedding=ArrayInfo(
-                (cfg.vocab_size, cfg.embed),
-                cfg.dtype,
-                ("vocab_in", "vocab_out"),
-                jax.nn.initializers.he_normal(in_axis=0, out_axis=1),
+                (cfg.vocab_size, cfg.embed), cfg.dtype, (None, "vocab_in"), _he_normal(in_axis=0, out_axis=1)
             ),
             gamma_final=ArrayInfo(
-                (cfg.embed,),
-                cfg.dtype,
-                ("act_embed",),
-                jax.nn.initializers.constant(1.0),
+                (cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones
             ),
             lm_head=ArrayInfo(
-                (cfg.embed, cfg.vocab_size),
-                cfg.dtype,
-                ("vocab_in", "vocab_out"),
-                jax.nn.initializers.he_normal(in_axis=1, out_axis=0),
+                (cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), _he_normal(in_axis=1, out_axis=0)
             ),
         )
 
@@ -809,7 +800,7 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
     )
     out_specs = l2p("batch", "act_heads", "sequence", "head_dim")
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
         q_org_shape = q.shape
         kv_repeats = q.shape[-3] // k.shape[-3]
@@ -1027,7 +1018,7 @@ def moe_block_ep(x: jax.Array, layer: MoELayer, cfg: Config):
     assert cfg.n_routed_experts % expert_count == 0
     expert_size = cfg.n_routed_experts // expert_count
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_spec, check_vma=False)
     def _expert_fn(x, we_gate, we_up, we_down, topk_weights, topk_idx):
         (b, s, d), e = x.shape, cfg.num_experts_per_tok
         expert_idx = jax.lax.axis_index(expert_axname) if expert_axname is not None else 0

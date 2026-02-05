@@ -26,36 +26,39 @@ from jax.sharding import PartitionSpec as P
 import torch
 from tqdm import tqdm
 
-from . import model as q3jax
+from . import model as n3jax
 
 
 def quantize_model(ckpt_path: Path, quant_ckpt_path: Path):
     ckpt_path, quant_ckpt_path = Path(ckpt_path).expanduser(), Path(quant_ckpt_path).expanduser()
     assert ckpt_path.is_dir()
-    cfg = q3jax.load_config(ckpt_path / "config.json")
+    cfg = n3jax.load_config(ckpt_path / "config.json")
     mesh = jax.make_mesh((1, jax.device_count(), 1), P("x", "y", "z"))
-    cfg = dataclasses.replace(cfg, mesh=mesh, quant_moe=True, quant_mlp=True, quant_attn=True)
+    cfg = dataclasses.replace(cfg, mesh=mesh, quant_moe=True, quant_mlp=True, quant_attn=True, quant_mamba=True)
 
-    additional_files = ["config.json", "tokenizer.json", "tokenizer_config.json"]
-    assert all((ckpt_path / file).exists() for file in additional_files)
     print("Loading weights...")
-    weights = q3jax.load_pytree(ckpt_path, q3jax.Weights.shardings(dataclasses.replace(cfg, quant_moe=False, quant_mlp=False, quant_attn=False)))
+    weights = n3jax.load_pytree(ckpt_path, n3jax.Weights.shardings(
+        dataclasses.replace(cfg, quant_moe=False, quant_mlp=False, quant_attn=False, quant_mamba=False))
+    )
 
     print("Converting weights...")
-    quant_layers = [q3jax.Layer.quantize(layer, cfg) for layer in tqdm(weights.layers, total=len(weights.layers))]
+    quant_layers = [n3jax.Layer.quantize(layer, cfg) for layer in tqdm(weights.layers, total=len(weights.layers))]
     quant_weights = dataclasses.replace(weights, layers=quant_layers)
 
     print("Saving weights...")
     if quant_ckpt_path.exists():
         shutil.rmtree(quant_ckpt_path)
     quant_ckpt_path.parent.mkdir(exist_ok=True)
-    q3jax.save_pytree(quant_weights, quant_ckpt_path)
+    n3jax.save_pytree(quant_weights, quant_ckpt_path)
 
-    for file in additional_files:
-        shutil.copyfile(ckpt_path / file, quant_ckpt_path / file)
+    # < 100 MB or so
+    for full_path in [path for path in ckpt_path.glob("*") if path.stat().st_size < 100e6 and path.is_file()]:
+        if not (quant_ckpt_path / full_path.name).exists():
+            shutil.copyfile(full_path, quant_ckpt_path / full_path.name)
 
 
-is_leaf = lambda x: isinstance(x, q3jax.ArrayInfo)
+
+is_leaf = lambda x: isinstance(x, n3jax.ArrayInfo)
 j2t = lambda x: torch.from_dlpack(x)
 
 
@@ -75,11 +78,49 @@ def _index_to_str(x):
             return str(getattr(x, field))
     raise ValueError
 
+def _format_mamba(params: dict[str, torch.Tensor], cfg: n3jax.Config):
+    params = dict(params)
+    new_params = dict(params).copy()  # shallow copy only
+    x_size = cfg.mamba_num_heads * cfg.mamba_head_dim
+    bc_size = cfg.mamba_n_groups * cfg.mamba_ssm_state_size
+    dt_size = cfg.mamba_num_heads
+    for key in [k for k in params.keys() if re.search(r"in_proj\.weight", k)]:
+        w = params[key].mT
+        assert w.shape == (cfg.embed, 2 * x_size + 2 * bc_size + dt_size)
+        wg, wx, wb, wc, wdt = torch.split(w, [x_size, x_size, bc_size, bc_size, dt_size], dim=-1)
+        wg = wg.reshape((cfg.embed, cfg.mamba_num_heads, cfg.mamba_head_dim))
+        wx = wx.reshape((cfg.embed, cfg.mamba_num_heads, cfg.mamba_head_dim))
+        wb = wb.reshape((cfg.embed, cfg.mamba_n_groups, cfg.mamba_ssm_state_size))
+        wc = wc.reshape((cfg.embed, cfg.mamba_n_groups, cfg.mamba_ssm_state_size))
+        wdt = wdt.reshape((cfg.embed, cfg.mamba_num_heads))
+        del new_params[key]
+        # key_root = ".".join(key.split(".")[:-2])
+        key_root = re.match(r"(.*?)in_proj\.weight", key)[1]
+        _join_key = lambda k, root=key_root: f"{root}{k}" if root else k
+        new_params[_join_key("wg_in")] = wg
+        new_params[_join_key("wx_in")] = wx
+        new_params[_join_key("wb_in")] = wb
+        new_params[_join_key("wc_in")] = wc
+        new_params[_join_key("wdt_in")] = wdt
+    pat = r"(.*?)(A_log|D|dt_bias)"
+    A_log_dt_bias_D_keys = [k for k in params.keys() if re.match(pat, k)]
+    prefix_groups = set([re.match(pat, k)[1] for k in A_log_dt_bias_D_keys])
+    for prefix_group in prefix_groups:
+        keys = [k for k in A_log_dt_bias_D_keys if k.startswith(prefix_group)]
+        weights = {re.match(pat, k)[2]: params[k] for k in keys}
+        assert all(k in weights for k in ["A_log", "D", "dt_bias"]), f"Some keys are missing, found: {weights.keys()}"
+        for k in keys:
+            del new_params[k]
+        new_params[_join_key("A_log_D_dt_bias", root=prefix_group)] = torch.cat(
+            [weights[k] for k in ["A_log", "D", "dt_bias"]], -1
+        )
+    return new_params
+
 def _stack_experts(params: dict[str, torch.Tensor]):
   key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))
   params = dict(params)
   new_params = dict(params).copy()
-  for kw in ["gate", "up", "down"]:
+  for kw in ["up", "down"]:
     match = r"(.*?)experts\.(.*?)\.{}_proj\.(.*)".format(kw)
     match = match.format(kw)
     keys = [k for k in params.keys() if re.match(match, k)]
@@ -93,81 +134,111 @@ def _stack_experts(params: dict[str, torch.Tensor]):
   return new_params
 
 
-def convert_weight(key: str, value: torch.Tensor, cfg: q3jax.Config):
+def convert_weight(key: str, value: torch.Tensor, cfg: n3jax.Config):
+    x_size = cfg.mamba_num_heads * cfg.mamba_head_dim
+    bc_size = cfg.mamba_n_groups * cfg.mamba_ssm_state_size
     value = value.detach()
     # HF checkpoint naming convention ------------------------------------------
     # attention ################################################################
     if re.search(r"q_proj\.weight", key) is not None:
         assert value.shape == (cfg.q_heads * cfg.head_dim, cfg.embed)
-        return t2j(value.T.reshape((cfg.embed, cfg.q_heads, cfg.head_dim)))
+        return t2j(value.T.reshape((cfg.embed, cfg.kv_heads, cfg.q_heads // cfg.kv_heads, cfg.head_dim)))
+        # return t2j(value.T.reshape((cfg.embed, cfg.q_heads, cfg.head_dim)))
     elif re.search(r"[kv]_proj\.weight", key) is not None:
         assert value.shape == (cfg.kv_heads * cfg.head_dim, cfg.embed)
         return t2j(value.T.reshape((cfg.embed, cfg.kv_heads, cfg.head_dim)))
     elif re.search(r"o_proj\.weight", key) is not None:
         assert value.shape == (cfg.embed, cfg.q_heads * cfg.head_dim)
-        return t2j(value.T.reshape((cfg.q_heads, cfg.head_dim, cfg.embed)))
+        return t2j(value.T.reshape((cfg.kv_heads, cfg.q_heads // cfg.kv_heads, cfg.head_dim, cfg.embed)))
+        # return t2j(value.T.reshape((cfg.q_heads, cfg.head_dim, cfg.embed)))
     # MoE ######################################################################
     elif re.search(r"gate\.weight", key) is not None:
         assert value.shape == (cfg.moe_num_experts, cfg.embed)
         return t2j(value.T)
-    elif re.search(r"experts\.down_proj", key) is not None:
+    elif re.search(r"gate\.e_score_correction_bias", key) is not None:
+        assert value.shape == (cfg.moe_num_experts,)
+        return t2j(value)
+    elif re.search(r"(\.|^)experts\.down_proj", key) is not None:
         assert value.shape == (cfg.moe_num_experts, cfg.embed, cfg.moe_ffw_size)
         return t2j(value.permute((0, 2, 1)))
-    elif re.search(r"experts\.(gate|up)_proj", key) is not None:
+    elif re.search(r"(\.|^)experts\.up_proj", key) is not None:
         assert value.shape == (cfg.moe_num_experts, cfg.moe_ffw_size, cfg.embed)
         return t2j(value.permute((0, 2, 1)))
-    # MLP ######################################################################
+    elif re.search(r"(\.|^)shared_experts\.down_proj", key) is not None:
+        assert value.shape == (cfg.embed, cfg.moe_shared_ffw_size)
+        return t2j(value.permute((1, 0)))
+    elif re.search(r"(\.|^)shared_experts\.up_proj", key) is not None:
+        assert value.shape == (cfg.moe_shared_ffw_size, cfg.embed)
+        return t2j(value.permute((1, 0)))
+    # shared misc weights ------------------------------------------------------
     elif re.search(r"down_proj", key) is not None:
         assert value.shape == (cfg.embed, cfg.mlp_ffw_size)
         return t2j(value.T)
-    elif re.search(r"(gate|up)_proj", key) is not None:
+    elif re.search(r"up_proj", key) is not None:
         assert value.shape == (cfg.mlp_ffw_size, cfg.embed)
         return t2j(value.T)
-    # shared misc weights ------------------------------------------------------
+    # MAMBA ####################################################################
+    elif re.search(r"conv1d\.weight", key) is not None:
+        assert value.shape == (x_size + 2 * bc_size, 1, cfg.mamba_conv_kernel_size)
+        return t2j(value)
+    elif re.search(r"conv1d\.bias", key) is not None:
+        assert value.shape == (x_size + 2 * bc_size,)
+        return t2j(value)
+    elif re.search(r"out_proj\.weight", key) is not None:
+        assert value.shape == (cfg.embed, cfg.mamba_num_heads * cfg.mamba_head_dim)
+        return t2j(value.T.reshape((cfg.mamba_num_heads, cfg.mamba_head_dim, cfg.embed)))
+    elif re.search(r"wg_in", key) is not None:
+        assert value.shape == (cfg.embed, cfg.mamba_num_heads, cfg.mamba_head_dim)
+        return t2j(value)
+    elif re.search(r"wx_in", key) is not None:
+        assert value.shape == (cfg.embed, cfg.mamba_num_heads, cfg.mamba_head_dim)
+        return t2j(value)
+    elif re.search(r"w(b|c)_in", key) is not None:
+        assert value.shape == (cfg.embed, cfg.mamba_n_groups, cfg.mamba_ssm_state_size)
+        return t2j(value)
+    elif re.search(r"wdt_in", key) is not None:
+        assert value.shape == (cfg.embed, cfg.mamba_num_heads)
+        return t2j(value)
+    elif re.search(r"A_log_D_dt_bias", key) is not None:
+        assert value.shape == (3 * cfg.mamba_num_heads,)
+        return t2j(value)
     # misc #####################################################################
-    elif re.search(r"embed_tokens", key) is not None:
+    elif re.search(r"embeddings", key) is not None:
         assert value.shape == (cfg.vocab_size, cfg.embed)
         return t2j(value)
     elif re.search(r"lm_head", key) is not None:
         assert value.shape == (cfg.vocab_size, cfg.embed)
         return t2j(value.T)
-    elif re.search(r"(q|k)_norm", key) is not None:
-        assert value.shape == (cfg.head_dim,)
-        return t2j(value)
-    elif re.search(r"layernorm", key) is not None:
-        assert value.shape == (cfg.embed,)
-        return t2j(value)
     elif re.search(r"norm", key) is not None:
-        assert value.shape == (cfg.embed,)
+        assert value.shape in [(cfg.embed,), (cfg.mamba_intermediate_size,)]
         return t2j(value)
     else:
         raise ValueError(f"Unknown weight {key = }")
 
+
 _HF_KEY_MAPPING = {
-    r"model\.embed_tokens\.weight": "embedding",
-    # attention projection weights
-    r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": r"layers.\1.attn.q",
-    r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": r"layers.\1.attn.k",
-    r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": r"layers.\1.attn.v",
-    r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": r"layers.\1.attn.o",
-    # norms
-    r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": r"layers.\1.attn.q_gamma",
-    r"model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": r"layers.\1.attn.k_gamma",
-    # layer norms (pre/post attention)
-    r"model\.layers\.([0-9]+)\.input_layernorm\.weight": r"layers.\1.attn_pre_gamma",
-    r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": r"layers.\1.attn_post_gamma",
-    # moe router
-    r"model\.layers\.([0-9]+)\.mlp\.gate\.weight": r"layers.\1.ffw.w_router",
-    # moe experts
-    r"model\.layers\.([0-9]+)\.mlp\.experts\.gate_proj\.weight": r"layers.\1.ffw.we_gate",
-    r"model\.layers\.([0-9]+)\.mlp\.experts\.up_proj\.weight": r"layers.\1.ffw.we_up",
-    r"model\.layers\.([0-9]+)\.mlp\.experts\.down_proj\.weight": r"layers.\1.ffw.we_down",
-    # mlp
-    r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": r"layers.\1.ffw.w_gate",
-    r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": r"layers.\1.ffw.w_up",
-    r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": r"layers.\1.ffw.w_down",
-    r"model\.norm\.weight": "gamma_final",
-    r"lm_head\.weight": "lm_head",
+    # Global Embeddings and Head
+    r"backbone\.embeddings\.weight": r"embedding",
+    r"backbone\.norm_f\.weight": r"gamma_final",
+    r"lm_head\.weight": r"lm_head",
+    # Main Layer Norm
+    r"backbone\.layers\.(\d+)\.norm\.weight": r"layers.\1.gamma",
+    # SSM / Mamba Block Components (e.g., Layers 0, 2, 4...)
+    r"backbone\.layers\.(\d+)\.mixer\.conv1d\.weight": r"layers.\1.ffw.w_conv",
+    r"backbone\.layers\.(\d+)\.mixer\.conv1d\.bias": r"layers.\1.ffw.b_conv",
+    r"backbone\.layers\.(\d+)\.mixer\.norm\.weight": r"layers.\1.ffw.gamma",
+    r"backbone\.layers\.(\d+)\.mixer\.out_proj\.weight": r"layers.\1.ffw.w_out",
+    r"backbone\.layers\.(\d+)\.mixer\.w([gxbcdt]+)_in": r"layers.\1.ffw.w\2_in",
+    r"backbone\.layers\.(\d+)\.mixer\.A_log_D_dt_bias": r"layers.\1.ffw.A_log_D_dt_bias",
+    # MoE Block Components (e.g., Layers 1, 3, 6...)
+    r"backbone\.layers\.(\d+)\.mixer\.gate\.weight": r"layers.\1.ffw.w_router",
+    r"backbone\.layers\.(\d+)\.mixer\.gate\.e_score_correction_bias": r"layers.\1.ffw.b_router",
+    r"backbone\.layers\.(\d+)\.mixer\.experts\.up_proj\.weight": r"layers.\1.ffw.we_up",
+    r"backbone\.layers\.(\d+)\.mixer\.experts\.down_proj\.weight": r"layers.\1.ffw.we_down",
+    r"backbone\.layers\.(\d+)\.mixer\.shared_experts\.up_proj\.weight": r"layers.\1.ffw.ws_up",
+    r"backbone\.layers\.(\d+)\.mixer\.shared_experts\.down_proj\.weight": r"layers.\1.ffw.ws_down",
+    # Attention Block Components (e.g., Layers 5, 12, 19...)
+    r"backbone\.layers\.(\d+)\.mixer\.([qkvo])_proj\.weight": r"layers.\1.ffw.\2",
 }
 
 def _torch_key_to_jax_key(source_key, custom_key_map: dict[str, str] | None = None):
@@ -188,9 +259,9 @@ def _map_weight(source_key, value: torch.Tensor, custom_transform_map: dict[str,
 
 
 def convert_model_or_layer(
-    layer: q3jax.Weights | q3jax.Layer,
+    layer: n3jax.Weights | n3jax.Layer,
     ref_layer: torch.nn.Module,
-    cfg: q3jax.Config,
+    cfg: n3jax.Config,
     device: jax.Device | None = None,
     sequential: bool = True,
     custom_key_map: dict[str, str] | None = None,
@@ -201,17 +272,14 @@ def convert_model_or_layer(
     device = device if device is not None else jax.devices("cpu")[0]
     torch_params = dict(ref_layer.named_parameters() if hasattr(ref_layer, "named_parameters") else ref_layer)
     torch_params = {k: v for (k, v) in torch_params.items() if prefix is None or k.startswith(prefix)}
+    print("Stacking experts")
     torch_params = _stack_experts(torch_params)
+    print("Reformatting mamba weights")
+    torch_params = _format_mamba(torch_params, cfg)
     layer_params = {
         ".".join(map(_index_to_str, k)): v for (k, v) in jax.tree.flatten_with_path(layer, is_leaf=is_leaf)[0]
     }
     new_params = {k: None for k in layer_params.keys()}
-
-    # some qwen3 checkpoints store both 'embed_tokens' and 'lm_head' even if the embeddings are tied
-    # in this case, we check that the weights are identical and delete 'lm_head'
-    if cfg.tie_embed and 'lm_head.weight' in torch_params:
-        torch.testing.assert_close(torch_params['lm_head.weight'], torch_params['model.embed_tokens.weight'])
-        del torch_params['lm_head.weight']
 
     def convert_weight_thread(tkey, tweight):
         with jax.default_device(device):
@@ -241,7 +309,7 @@ def convert_model_or_layer(
         if param.shape != new_param.shape:
             raise ValueError(f"Shape of {key=} does not match, expected = {param.shape}, got {new_param.shape}")
 
-    if isinstance(layer, q3jax.Weights):
+    if isinstance(layer, n3jax.Weights):
         return jax.tree.unflatten(jax.tree.structure(layer, is_leaf=is_leaf), new_params.values())
     else:
         return jax.tree.unflatten(

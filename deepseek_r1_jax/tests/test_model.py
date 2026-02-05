@@ -43,7 +43,9 @@ SMALL_CFG = dsjax.Config(
 
 class TestModel(parameterized.TestCase):
     def setUp(self):
-        self.mesh = jax.make_mesh((1, len(jax.devices()), 1), P("x", "y", "z"))
+        self.mesh = jax.make_mesh(
+            (1, len(jax.devices()), 1), P("x", "y", "z"), axis_types=(jax.sharding.AxisType.Auto,) * 3
+        )
         self.small_cfg = dataclasses.replace(SMALL_CFG, mesh=self.mesh)
 
     @parameterized.product(quant=[False, True])
@@ -51,6 +53,26 @@ class TestModel(parameterized.TestCase):
         cfg = dataclasses.replace(self.small_cfg, quantize_attn=quant, quantize_moe=quant)
         weights = dsjax.Weights.init(random.key(0), cfg)
         del weights
+
+    @parameterized.product(quant=[False, True])
+    def test_init_hashing(self, quant):
+        cfg = dataclasses.replace(self.small_cfg, quantize_cache=quant)
+        hash_fn = lambda x: hash(tuple(jax.tree.leaves(x, is_leaf=dsjax.is_param)))
+        with self.subTest("Testing weights abstract and shardings hashing"):
+            abstract = dsjax.Weights.abstract(cfg)
+            abstract2 = dsjax.Weights.abstract(cfg)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = dsjax.Weights.shardings(cfg)
+            shardings2 = dsjax.Weights.shardings(cfg)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
+
+        with self.subTest("Testing kv-cache abstract and shardings hashing"):
+            abstract = dsjax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            abstract2 = dsjax.KVCache.abstract(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(abstract), hash_fn(abstract2))
+            shardings = dsjax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            shardings2 = dsjax.KVCache.shardings(cfg, 2, cfg.max_seq_len)
+            self.assertEqual(hash_fn(shardings), hash_fn(shardings2))
 
     @parameterized.product(quant=[False, True])
     def test_cache_init(self, quant):

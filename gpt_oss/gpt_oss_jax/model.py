@@ -227,8 +227,8 @@ _length_minus_right_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
 which_platform = lambda cfg: cfg.mesh.devices.reshape(-1)[0].platform
-# he_normal generates a new lambda every time it's called which defeats caching for `Layer.init`, so cache the lambda
-_he_normal = lru_cache(lambda *args, **kw: jax.nn.initializers.he_normal(*args, **kw))
+_he_normal = lru_cache(jax.nn.initializers.he_normal)
+_const_init = lru_cache(jax.nn.initializers.constant)
 
 
 @partial(jax.jit, static_argnames=("abstract", "shardings"))
@@ -459,8 +459,8 @@ class Layer(_Init):
         layer = Layer(
             ffw=MoELayer.abstract(cfg),
             attn=AttentionLayer.abstract(cfg),
-            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
-            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
+            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
         )
         # layer = cls.quantize(layer, cfg)  # abstract already quantized
         return layer
@@ -485,8 +485,8 @@ class Weights(_Init):
         init01, init10 = _he_normal(in_axis=0, out_axis=1), _he_normal(in_axis=1, out_axis=0)
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init01),
-            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, (None, "vocab_in"), init01),
+            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init10),
         )
 
@@ -513,7 +513,7 @@ class KVCache(_Init):
         cache = KVCache(
             k=[val_info for _ in range(cfg.num_layers)],
             v=[val_info for _ in range(cfg.num_layers)],
-            iter=ArrayInfo((), jnp.int32, (), jax.nn.initializers.constant(-1)),
+            iter=ArrayInfo((), jnp.int32, (), _const_init(-1)),
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), jax.nn.initializers.zeros),
             size=max_seq_len,
         )

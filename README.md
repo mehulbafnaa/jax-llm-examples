@@ -11,6 +11,7 @@ Current contents include:
 * [Qwen 3](qwen3/)
 * [Kimi K2](kimi_k2/)
 * [OpenAI GPT OSS](gpt_oss/)
+* [NVIDIA Nemotron 3 Nano](nemotron3/)
 
 ---
 

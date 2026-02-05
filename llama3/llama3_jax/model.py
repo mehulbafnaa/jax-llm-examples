@@ -19,7 +19,7 @@ import os
 import json
 from pathlib import Path
 import math
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable, Any, TypeVar
 from collections import OrderedDict as odict
 
@@ -29,7 +29,6 @@ from jax import random
 from jax import tree_util
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
-from jax.experimental.shard_map import shard_map
 from jax.sharding import PartitionSpec as P, auto_axes, reshard
 from jax.experimental.array_serialization import pytree_serialization as ser
 from jax.experimental.pallas.ops.gpu import paged_attention
@@ -209,6 +208,8 @@ _count_left_padding = lambda ids, pad_id=0: auto_axes(
 _length_minus_right_padding = lambda segment_ids: auto_axes(
     lambda segment_ids: jnp.sum(jnp.cumsum(jnp.flip(segment_ids != 0, -1), axis=-1) > 0, -1), out_sharding=P(None)
 )(segment_ids)
+_he_normal = lru_cache(jax.nn.initializers.he_normal)
+_const_init = lru_cache(jax.nn.initializers.constant)
 
 
 @partial(jax.jit, static_argnames=("abstract", "shardings"))
@@ -335,25 +336,34 @@ class Layer(_Init):
 
     @classmethod
     def abstract(cls, cfg: Config) -> "Layer":
-        _init = lambda *out_axes: jax.nn.initializers.he_normal(in_axis=0, out_axis=out_axes)
+        _init = _he_normal
         layer = Layer(
             q=ArrayInfo(
-                (cfg.embed, cfg.q_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "q_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.q_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "q_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             k=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "kv_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             v=ArrayInfo(
-                (cfg.embed, cfg.kv_heads, cfg.head_dim), cfg.dtype, ("qkv_embed", "kv_heads", "head_dim"), _init(1, 2)
+                (cfg.embed, cfg.kv_heads, cfg.head_dim),
+                cfg.dtype,
+                ("qkv_embed", "kv_heads", "head_dim"),
+                _init(0, (1, 2)),
             ),
             o=ArrayInfo(
-                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init(1, 2)
+                (cfg.q_heads, cfg.head_dim, cfg.embed), cfg.dtype, ("o_heads", "head_dim", "o_embed"), _init(0, (1, 2))
             ),
-            w_gate=ArrayInfo((cfg.embed, cfg.ffw_size), cfg.dtype, ("embed_up", "ffw_up"), _init(1)),
-            w_up=ArrayInfo((cfg.embed, cfg.ffw_size), cfg.dtype, ("embed_up", "ffw_up"), _init(1)),
-            w_down=ArrayInfo((cfg.ffw_size, cfg.embed), cfg.dtype, ("ffw_down", "embed_down"), _init(1)),
-            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
-            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            w_gate=ArrayInfo((cfg.embed, cfg.ffw_size), cfg.dtype, ("embed_up", "ffw_up"), _init(0, 1)),
+            w_up=ArrayInfo((cfg.embed, cfg.ffw_size), cfg.dtype, ("embed_up", "ffw_up"), _init(0, 1)),
+            w_down=ArrayInfo((cfg.ffw_size, cfg.embed), cfg.dtype, ("ffw_down", "embed_down"), _init(0, 1)),
+            attn_pre_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
+            attn_post_gamma=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
         )
         layer = cls.quantize(layer, cfg)
         return layer
@@ -385,11 +395,11 @@ class Weights(_Init):
     @classmethod
     def abstract(cls, cfg: Config):
         layers = [Layer.abstract(cfg) for _ in range(cfg.num_layers)]
-        init = lambda in_axis, out_axis: jax.nn.initializers.he_normal(in_axis=in_axis, out_axis=out_axis)
+        init = _he_normal
         return Weights(
             layers=layers,
-            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, ("vocab_in", "vocab_in"), init(0, 1)),
-            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.constant(1.0)),
+            embedding=ArrayInfo((cfg.vocab_size, cfg.embed), cfg.dtype, (None, "vocab_in"), init(0, 1)),
+            gamma_final=ArrayInfo((cfg.embed,), cfg.dtype, ("act_embed",), jax.nn.initializers.ones),
             lm_head=ArrayInfo((cfg.embed, cfg.vocab_size), cfg.dtype, ("vocab_in", "vocab_out"), init(1, 0)),
         )
 
@@ -419,7 +429,7 @@ class KVCache(_Init):
             k=[val_info for _ in range(cfg.num_layers)],
             v=[val_info for _ in range(cfg.num_layers)],
             # -1 means unintialized since iter (cursor) must be 0 <= iter < len - 1
-            iter=ArrayInfo((), jnp.int32, (), jax.nn.initializers.constant(-1)),
+            iter=ArrayInfo((), jnp.int32, (), _const_init(-1)),
             starts=ArrayInfo((batch_size,), jnp.int32, ("batch",), jax.nn.initializers.zeros),
             size=cfg.max_seq_len,
         )
@@ -475,9 +485,9 @@ class PagedKVCache(_Init):
         cache = PagedKVCache(
             k=[val_info for _ in range(cfg.num_layers)],
             v=[val_info for _ in range(cfg.num_layers)],
-            lengths=ArrayInfo((batch_size,), jnp.int32, (), jax.nn.initializers.constant(0)),
-            block_tables=ArrayInfo((batch_size, pages_per_seq), jnp.int32, (), jax.nn.initializers.constant(0)),
-            free_pages=ArrayInfo((total_num_pages,), jnp.bool, (), jax.nn.initializers.constant(1)),
+            lengths=ArrayInfo((batch_size,), jnp.int32, (), jax.nn.initializers.zeros),
+            block_tables=ArrayInfo((batch_size, pages_per_seq), jnp.int32, (), jax.nn.initializers.zeros),
+            free_pages=ArrayInfo((total_num_pages,), jnp.bool, (), jax.nn.initializers.ones),
         )
         if cfg.quant_cache:
             _quantize = partial(quantize, axis=-1, scale_dtype=cfg.quant_scale_dtype)
@@ -755,7 +765,7 @@ def attention_kernel(q, k, v, q_segment_ids, kv_segment_ids, q_offset, starts, l
     in_specs += (None if v_scale is None else l2p("batch", "kv_heads", "sequence"),)
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, v, q_segment_ids, kv_segment_ids, starts, lengths, k_scale, v_scale):
         q_org_shape = q.shape
 
@@ -821,7 +831,7 @@ def paged_attention_kernel(q, k, v, block_tables, lengths, cfg: Config):
     )
     out_specs = q_spec
 
-    @partial(shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_rep=False)
+    @partial(jax.shard_map, mesh=cfg.mesh, in_specs=in_specs, out_specs=out_specs, check_vma=False)
     def _f(q, k, k_scale, v, v_scale, block_tables, lengths):
         # q in [batch_size, kv_heads_local, kv_repeats, 1, head_dim]
         if k_scale is not None:

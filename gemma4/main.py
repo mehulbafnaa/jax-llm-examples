@@ -51,6 +51,7 @@ if __name__ == "__main__":
 
     ckpt_path = epath.Path("/tmp/ramdisk/gemma4-jax-E2B").expanduser()
     # ckpt_path = epath.Path("/tmp/ramdisk/gemma4-jax-E4B").expanduser()
+    # ckpt_path = epath.Path("/tmp/ramdisk/gemma4-jax-12B").expanduser()
     # ckpt_path = epath.Path("/tmp/ramdisk/gemma4-jax-31B").expanduser()
     # ckpt_path = epath.Path("/tmp/ramdisk/gemma4-jax-26B-A4B").expanduser()
     if quant:

@@ -38,9 +38,10 @@ jax.config.update("jax_num_cpu_devices", 4)
 
 MOE_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_26B_A4B_JSON)["text_config"])
 DENSE_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_31B_JSON)["text_config"])
+DENSE12B_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_12B_JSON)["text_config"])
 E2B_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_E2B_JSON)["text_config"])
 
-MODELS = ["moe", "dense", "e2b"]
+MODELS = ["moe", "dense", "dense12b", "e2b"]
 
 
 class TestModel(parameterized.TestCase):
@@ -61,6 +62,7 @@ class TestModel(parameterized.TestCase):
         self.cfgs = dict(
             moe=_small(MOE_CFG, moe_ffw_size=16, moe_num_experts=16),
             dense=_small(DENSE_CFG),
+            dense12b=_small(DENSE12B_CFG),
             e2b=_small(E2B_CFG, num_kv_shared_layers=2),
         )
 

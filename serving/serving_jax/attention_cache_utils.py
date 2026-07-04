@@ -266,6 +266,88 @@ def kvcache_get_sequence(cache: KVCache, batch_idx: jax.Array):
 
 
 ########################################################################################################################
+# Gemma-style unrolled KV cache utils ##################################################################################
+########################################################################################################################
+# The utils above stack every layer's KV into a single array along a new leading axis before transit -- this makes the
+# per-request buffer a single (large) array which dispatches faster. That trick requires every layer's cache buffer to
+# share the same shape. Gemma-family models interleave local (sliding-window) and global attention layers whose caches
+# differ in sequence length (and possibly head_dim), so they cannot be stacked. These helpers instead keep the buffers
+# *unrolled*: a plain per-layer list. Correctness with the mixed local/global layout is handled *principally* -- each
+# layer uses its own `sizes[l]` / `iters[l]` / `starts[l]` and the sequence length is clamped to that layer's window,
+# reusing the exact same right-alignment scheme as the stacked path. No model-specific special-casing is needed.
+#
+# The gemma KVCache is expected to expose per-layer lists `k`, `v`, `iters`, `starts`, per-layer static `sizes`, a
+# scalar `time_axis`, and a `global_fill_len()` helper. The cache is assumed unquantized (quant_cache=False) so that
+# each per-layer buffer is a plain jax.Array.
+
+
+@jax.jit
+def gemma_kvcache_get_sequence(cache, batch_idx: jax.Array):
+    """Extract one request's KV, unrolled per-layer and left-aligned (content starts at index 0) within each layer."""
+    ta = cache.time_axis  # 2, for buffers shaped [batch, kv_heads, seq, head_dim]
+
+    def _left_align(buf, starts):
+        # roll so the (right-aligned, ring-buffer) content for this request starts at physical index 0
+        return jnp.roll(buf[batch_idx, ...], shift=-starts[batch_idx], axis=ta - 1)
+
+    k = [_left_align(cache.k[l], cache.starts[l]) for l in range(len(cache.k))]
+    v = [_left_align(cache.v[l], cache.starts[l]) for l in range(len(cache.v))]
+    true_len = cache.global_fill_len()[batch_idx]  # true token count (global layers keep the full sequence)
+    return (k, v), true_len
+
+
+@partial(jax.jit, donate_argnames=("cache",))
+def _gemma_maybe_erase_only(cache, erase):
+    new_iters = [jnp.where(erase, -1, it) for it in cache.iters]  # -1 marks the cache uninitialized
+    return dataclasses.replace(cache, iters=new_iters)
+
+
+@partial(jax.jit, donate_argnames=("cache",))
+def _gemma_kvcache_insert_sequences(cache, kvs, batch_idxs, actual_lens, update_mask, erase=False):
+    ta = cache.time_axis
+    batch_idxs, actual_lens, update_mask = jnp.array(batch_idxs), jnp.array(actual_lens), jnp.array(update_mask)
+    batch_idxs = jnp.where(update_mask, batch_idxs, 2**30)  # masked (padding) updates scatter out-of-bounds -> dropped
+
+    new_k, new_v, new_iters, new_starts = list(cache.k), list(cache.v), list(cache.iters), list(cache.starts)
+    for l in range(len(cache.k)):
+        size_l = cache.sizes[l]  # static python int (local window or full max_seq_len)
+        # gather this layer's per-request updates into a single leading (request) axis: [E, kv_heads, size_l, head_dim]
+        u_k = jnp.stack([kvs[e][0][l] for e in range(len(kvs))], axis=0)
+        u_v = jnp.stack([kvs[e][1][l] for e in range(len(kvs))], axis=0)
+        lens_l = jnp.minimum(actual_lens, size_l)  # this layer only retains up to its own window
+        uninitialized = jnp.logical_or(cache.iters[l] < 0, erase)
+        # right-align each request so it ends exactly at the (shared) write cursor `iters[l]`; fresh cache: pack to max
+        start_time = jnp.where(uninitialized, jnp.max(lens_l) - lens_l, (cache.iters[l] - lens_l) % size_l)
+        time_indices = (jnp.arange(size_l)[None, :] + start_time[:, None]) % size_l  # [E, size_l], physical positions
+
+        def _scatter(x, u):
+            @partial(jax.shard_map, out_specs=jax.typeof(x).sharding.spec)
+            def update_fn(x, u, batch_idxs, time_indices):
+                permute = [0, ta] + [i for i in range(u.ndim) if i not in (0, ta)]
+                return x.at[batch_idxs[:, None], :, time_indices, ...].set(u.transpose(permute), mode="drop")
+
+            return update_fn(x, u, batch_idxs, time_indices)
+
+        new_k[l], new_v[l] = _scatter(cache.k[l], u_k), _scatter(cache.v[l], u_v)
+        new_starts[l] = cache.starts[l].at[batch_idxs].set(
+            start_time, mode="drop", out_sharding=jax.typeof(cache.starts[l]).sharding.spec
+        )
+        new_iters[l] = jnp.where(uninitialized, jnp.max(lens_l), cache.iters[l])
+    return dataclasses.replace(cache, k=new_k, v=new_v, iters=new_iters, starts=new_starts)
+
+
+def gemma_kvcache_insert_sequences(cache, kvs, batch_idxs, actual_lens, erase: bool = False, impl: str = "xla"):
+    assert impl == "xla", "gemma unrolled cache insert only implements the 'xla' scatter path (GPU/CPU)."
+    if len(kvs) == 0:
+        return _gemma_maybe_erase_only(cache, erase)
+    pad_len = max(next_power_of_2(len(kvs)), 4) - len(kvs)  # an update of power of 2 and at least 4 to limit variants
+    update_mask = [i < len(kvs) for i in range(len(kvs) + pad_len)]
+    kvs = list(kvs) + [kvs[-1]] * pad_len
+    batch_idxs, actual_lens = list(batch_idxs) + [batch_idxs[-1]] * pad_len, list(actual_lens) + [actual_lens[-1]] * pad_len
+    return _gemma_kvcache_insert_sequences(cache, kvs, batch_idxs, actual_lens, update_mask, erase=erase)
+
+
+########################################################################################################################
 # Paged KV cache utils #################################################################################################
 ########################################################################################################################
 

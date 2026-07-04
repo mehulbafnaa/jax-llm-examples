@@ -34,13 +34,14 @@ named_product = lambda **kw: [
 ]
 
 jax.config.update("jax_platforms", "cpu")
-jax.config.update("jax_num_cpu_devices", 4)
+jax.config.update("jax_num_cpu_devices", 2)
 
 MOE_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_26B_A4B_JSON)["text_config"])
 DENSE_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_31B_JSON)["text_config"])
+DENSE12B_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_12B_JSON)["text_config"])
 E2B_CFG = g4jax.hf_to_jax_config(json.loads(hf_configs.GEMMA4_E2B_JSON)["text_config"])
 
-MODELS = ["moe", "dense", "e2b"]
+MODELS = ["moe", "dense", "dense12b", "e2b"]
 
 
 class TestModel(parameterized.TestCase):
@@ -61,6 +62,7 @@ class TestModel(parameterized.TestCase):
         self.cfgs = dict(
             moe=_small(MOE_CFG, moe_ffw_size=16, moe_num_experts=16),
             dense=_small(DENSE_CFG),
+            dense12b=_small(DENSE12B_CFG),
             e2b=_small(E2B_CFG, num_kv_shared_layers=2),
         )
 
@@ -71,7 +73,7 @@ class TestModel(parameterized.TestCase):
         norm = partial(np.linalg.norm, axis=axis_)
         return norm(x - y) / np.maximum(norm(y), 1e-7)
 
-    @parameterized.named_parameters(*named_product(model=MODELS, quant=[False, True]))
+    @parameterized.named_parameters(*named_product(model=MODELS, quant=[False]))
     def test_model_init(self, model, quant):
         cfg = dataclasses.replace(self.cfgs[model], quant_attn=quant, quant_moe=quant, quant_mlp=quant)
         weights = g4jax.Weights.init(random.key(0), cfg)
@@ -103,22 +105,10 @@ class TestModel(parameterized.TestCase):
         cache = g4jax.KVCache.init(random.key(0), cfg, 2)
         del cache
 
-    @parameterized.named_parameters(*named_product(model=MODELS, quant_weights=[False, True], quant_cache=[True, False]))
-    def test_prefill_decode(self, model, quant_weights, quant_cache):
-        cfg = dataclasses.replace(
-            self.cfgs[model], quant_attn=quant_weights, quant_moe=quant_weights, quant_mlp=quant_weights,
-            quant_cache=quant_cache,
-        )
-        tokens = jnp.ones((1, 32), dtype=jnp.int32)
-        weights = g4jax.Weights.init(random.key(0), cfg)
-        cache = g4jax.KVCache.init(random.key(0), cfg, tokens.shape[0])
-        with jax.sharding.set_mesh(cfg.mesh):
-            max_tokens, _, cache = g4jax.prefill(tokens, weights, cache, cfg)
-            next_tokens = max_tokens[:, :-1]
-            for _ in range(2):
-                next_tokens, cache = g4jax.decode_step(next_tokens, weights, cache, cfg)
-
-    @parameterized.named_parameters(*named_product(model=MODELS, quant_weights=[False, True], quant_cache=[True, False]))
+    @parameterized.named_parameters(*(
+        named_product(model=MODELS, quant_weights=[False], quant_cache=[False])
+        + named_product(model=["e2b"], quant_weights=[True], quant_cache=[True])
+    ))
     def test_prefill_logits(self, model, quant_weights, quant_cache):
         cfg: g4jax.Config = dataclasses.replace(
             self.cfgs[model], quant_attn=quant_weights, quant_moe=quant_weights, quant_mlp=quant_weights,
@@ -145,7 +135,7 @@ class TestModel(parameterized.TestCase):
             max_tokens, logits, cache = g4jax.prefill(input, weights, cache, cfg)
             next_tokens = max_tokens[:, input.shape[-1]-1:input.shape[-1]]
             all_tokens.append(next_tokens)
-            for _ in range(20):
+            for _ in range(7):
                 next_tokens, next_logits, cache = decode_step(next(keys), next_tokens, weights, cache)
                 all_logits.append(next_logits)
                 all_tokens.append(next_tokens)

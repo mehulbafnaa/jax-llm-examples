@@ -6,6 +6,7 @@ from pathlib import Path
 example_models = [
     "google/gemma-4-26B-A4B-it",
     "google/gemma-4-31B-it",
+    "google/gemma-4-12B-it",
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
 ]

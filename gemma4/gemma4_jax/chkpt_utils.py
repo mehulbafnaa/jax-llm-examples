@@ -45,7 +45,7 @@ def quantize_model(ckpt_path: Path, quant_ckpt_path: Path):
   ckpt_path, quant_ckpt_path = Path(ckpt_path).expanduser(), Path(quant_ckpt_path).expanduser()
   assert ckpt_path.is_dir()
   cfg = g4jax.load_config(ckpt_path / "config.json")
-  mesh = jax.make_mesh((1, jax.device_count(), 1), ("x", "y", "z"), axis_types=3 * (AxisType.Explicit,))
+  mesh = jax.make_mesh((1, 1, jax.device_count()), ("x", "y", "z"), axis_types=3 * (AxisType.Explicit,))
   cfg = dataclasses.replace(cfg, mesh=mesh, quant_moe=True, quant_mlp=True, quant_attn=False)
 
   print("Loading weights...")

@@ -372,6 +372,21 @@ of arbitrary length, it’s possible to have only a single worker which combines
 short prefill chunks and decode token work in the same batch to optimally
 balance decode and prefill throughput.
 
+3. Heterogeneous (local + global) KV caches – most examples here stack every
+layer’s KV into a single array along a new leading axis before moving it between
+the prefill and decode stages, which makes each request’s buffer one large array
+that dispatches faster. That requires every layer’s cache buffer to share a
+shape. Gemma-family models interleave *local* (sliding-window) and *global*
+attention layers whose caches differ in sequence length, so they cannot be
+stacked. The `main_serving_gemma4.py` example keeps the buffers **unrolled** (a
+plain per-layer list) via `gemma_kvcache_{get,insert}_sequence` in
+`serving_jax/attention_cache_utils.py`. Continuous batching still works with no
+model-specific special-casing: each layer inserts using its own
+window/cursor/`starts`, clamping the sequence length to that layer’s window and
+reusing the same right-alignment scheme as the stacked path. (Prefix caching is
+disabled in that example because the mixed per-layer cache sizes make the
+single-axis chunked prefix store ill-defined.)
+
 <p align="center" style="font-weight: bold">
 🚨 If you're into serving with JAX, please contribute back by opening issues and
 PRs! 🚨

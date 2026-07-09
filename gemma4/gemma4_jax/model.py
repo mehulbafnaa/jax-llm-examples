@@ -916,8 +916,11 @@ def attention_kernel(
 
                 def attn_fn(q, k, v, _, mask):
                     q, k, v = q.swapaxes(0, 1), k[:, None, :], v[:, None, :]
-                    impl = "cudnn" if which_platform(cfg) == "gpu" else "xla"
-                    return jax.nn.dot_product_attention(q, k, v, mask=mask, implementation=impl).swapaxes(0, 1)
+                    # cuDNN flash attention only supports head_dim <= 128; Gemma4 uses head_dim 256 (local) / 512 (global),
+                    # so we fall back to the XLA implementation there. Otherwise cuDNN raises NotImplementedError on GPU.
+                    use_cudnn = which_platform(cfg) == "gpu" and q.shape[-1] <= 128
+                    impl = "cudnn" if use_cudnn else "xla"
+                    return jax.nn.dot_product_attention(q, k, v, mask=mask, scale=1.0, implementation=impl).swapaxes(0, 1)
 
             attn_fn = jax.vmap(attn_fn, (0, 0, 0, None, None))  # map over kv heads for mqa
             attn_fn = jax.vmap(attn_fn, (0, 0, 0, 0, 0))  # map over batch
